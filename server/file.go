@@ -29,15 +29,19 @@ type FileReadCloser struct {
 }
 
 // Read Reads bytes from filereader
+//
+// When the reader has drained everything written so far but the writer has not
+// finished, it waits on the file's condition variable. Returning (0, nil) here
+// instead would make io.Copy retry immediately, spinning a whole CPU core for
+// every reader parked on an in-progress file.
 func (r *FileReadCloser) Read(p []byte) (int, error) {
 	r.File.lock.RLock()
 	defer r.File.lock.RUnlock()
+	for r.offset >= len(r.File.buffer) && !r.File.eof {
+		r.File.cond.Wait()
+	}
 	if r.offset >= len(r.File.buffer) {
-		if r.File.eof {
-			return 0, io.EOF
-		}
-
-		return 0, nil
+		return 0, io.EOF
 	}
 	n := copy(p, r.File.buffer[r.offset:])
 	r.offset += n
@@ -47,9 +51,15 @@ func (r *FileReadCloser) Read(p []byte) (int, error) {
 
 // File Definition of file
 type File struct {
-	Name       string
-	headers    http.Header
-	lock       *sync.RWMutex
+	Name    string
+	headers http.Header
+	lock    *sync.RWMutex
+	// cond signals readers parked on an in-progress file. Its Locker is
+	// lock.RLocker(), which is safe because every waiter is a reader holding
+	// RLock. Wait enqueues on the notify list before unlocking, and a writer
+	// cannot append while a reader holds RLock, so a Broadcast issued after the
+	// write lock is released can never be missed.
+	cond       *sync.Cond
 	buffer     []byte
 	eof        bool
 	onDisk     bool
@@ -69,6 +79,7 @@ func NewFile(name string, headers http.Header, maxAgeS int64) *File {
 		receivedAt: time.Now(),
 		maxAgeS:    maxAgeS,
 	}
+	f.cond = sync.NewCond(f.lock.RLocker())
 
 	contentType := f.GetContentType()
 
@@ -107,8 +118,9 @@ func (f *File) NewReadCloser(baseDir string, w http.ResponseWriter) io.ReadClose
 // Close Closes a file
 func (f *File) Close() error {
 	f.lock.Lock()
-	defer f.lock.Unlock()
 	f.eof = true
+	f.lock.Unlock()
+	f.cond.Broadcast()
 
 	return nil
 }
@@ -116,8 +128,9 @@ func (f *File) Close() error {
 // Write Write bytes to a file
 func (f *File) Write(p []byte) (int, error) {
 	f.lock.Lock()
-	defer f.lock.Unlock()
 	f.buffer = append(f.buffer, p...)
+	f.lock.Unlock()
+	f.cond.Broadcast()
 	return len(p), nil
 }
 
@@ -146,7 +159,6 @@ func (f *File) WriteToDisk(baseDir string) error {
 // RemoveFromDisk Removes file from disc
 func (f *File) RemoveFromDisk(baseDir string) error {
 	f.lock.Lock()
-	defer f.lock.Unlock()
 
 	name := path.Join(baseDir, f.Name)
 	err := os.Remove(name)
@@ -154,6 +166,13 @@ func (f *File) RemoveFromDisk(baseDir string) error {
 	// even if we get an error, lets act as if the file is completely removed
 	f.onDisk = false
 	f.buffer = nil
+	// Discarding the buffer is terminal for anyone still reading it, so treat it
+	// as end of file and wake any reader parked in Read. Without this a reader
+	// waiting on a file removed before its writer closed would wait forever.
+	f.eof = true
+
+	f.lock.Unlock()
+	f.cond.Broadcast()
 
 	return err
 }
