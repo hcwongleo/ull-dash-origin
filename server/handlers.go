@@ -65,7 +65,7 @@ func GetHandler(waitingRequests *WaitingRequests, cors *Cors, basePath string, w
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.Copy(ChunkedResponseWriter{w}, f.NewReadCloser(basePath, w))
+	io.Copy(ChunkedResponseWriter{w}, f.NewReadCloser(r.Context(), basePath, w))
 }
 
 // HeadHandler Sends if file exists

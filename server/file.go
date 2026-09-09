@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -25,6 +26,11 @@ var (
 type FileReadCloser struct {
 	offset int
 	w      http.ResponseWriter
+	ctx    context.Context
+	// stopWake deregisters the context callback that wakes this reader. Calling
+	// it is optional: the callback is released anyway once ctx is done, and a
+	// request context always completes.
+	stopWake func() bool
 	*File
 }
 
@@ -34,10 +40,18 @@ type FileReadCloser struct {
 // finished, it waits on the file's condition variable. Returning (0, nil) here
 // instead would make io.Copy retry immediately, spinning a whole CPU core for
 // every reader parked on an in-progress file.
+//
+// A parked reader is invisible to net/http, so the request context is checked on
+// every wakeup. NewReadCloser arranges for cancellation to broadcast, which is
+// what makes a disconnected viewer's goroutine terminate instead of waiting for
+// a writer that may never come back.
 func (r *FileReadCloser) Read(p []byte) (int, error) {
 	r.File.lock.RLock()
 	defer r.File.lock.RUnlock()
 	for r.offset >= len(r.File.buffer) && !r.File.eof {
+		if err := r.ctx.Err(); err != nil {
+			return 0, err
+		}
 		r.File.cond.Wait()
 	}
 	if r.offset >= len(r.File.buffer) {
@@ -47,6 +61,19 @@ func (r *FileReadCloser) Read(p []byte) (int, error) {
 	r.offset += n
 	// r.w.(http.Flusher).Flush()
 	return n, nil
+}
+
+// Close Releases the reader.
+//
+// This deliberately shadows the promoted File.Close. FileReadCloser embeds
+// *File, so without this method closing a reader would set eof on the file and
+// silently truncate a segment still being ingested for every other reader.
+func (r *FileReadCloser) Close() error {
+	if r.stopWake != nil {
+		r.stopWake()
+	}
+
+	return nil
 }
 
 // File Definition of file
@@ -93,9 +120,17 @@ func (f *File) GetContentType() string {
 }
 
 // NewReadCloser Crates a new filereader from a file
-func (f *File) NewReadCloser(baseDir string, w http.ResponseWriter) io.ReadCloser {
+//
+// ctx is the request context. When it is cancelled the file's condition variable
+// is broadcast, so a reader parked in Read wakes up and observes the
+// cancellation rather than waiting on a writer indefinitely.
+func (f *File) NewReadCloser(ctx context.Context, baseDir string, w http.ResponseWriter) io.ReadCloser {
 	f.lock.RLock()
 	defer f.lock.RUnlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	if f.onDisk {
 		name := path.Join(baseDir, f.Name)
@@ -108,11 +143,15 @@ func (f *File) NewReadCloser(baseDir string, w http.ResponseWriter) io.ReadClose
 	}
 
 	fmt.Println("Reading from memory")
-	return &FileReadCloser{
+	r := &FileReadCloser{
 		offset: 0,
 		w:      w,
+		ctx:    ctx,
 		File:   f,
 	}
+	r.stopWake = context.AfterFunc(ctx, f.cond.Broadcast)
+
+	return r
 }
 
 // Close Closes a file
