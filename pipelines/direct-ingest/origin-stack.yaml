@@ -315,11 +315,15 @@ Resources:
           exec > >(tee /var/log/origin-bootstrap.log) 2>&1
           set -x
 
+          # aws-cfn-bootstrap is NOT preinstalled on Amazon Linux 2023 - it was on
+          # AL2. Without it cfn-signal does not exist, no signal is ever sent, and
+          # the CreationPolicy below times out and rolls the whole stack back.
+          # Installed FIRST, so the error trap below always has a working signal.
+          dnf install -y aws-cfn-bootstrap golang git
+
           fail() { /opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} \
                      --resource OriginInstance --region ${AWS::Region}; exit 1; }
           trap fail ERR
-
-          dnf install -y golang git
 
           # A pinned tag, so this builds the same bytes every time. Dependencies
           # are vendored and GOPROXY is off: the only network dependency is the
