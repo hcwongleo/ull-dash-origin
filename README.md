@@ -68,6 +68,9 @@ caused two outages during development. It is not yet fixed; see
 
 ## The two pipelines
 
+Visual comparison, with the security and latency trade-offs animated:
+**[docs/pipelines-compared.html](docs/pipelines-compared.html)** (open it locally).
+
 | | Ingest path | |
 |---|---|---|
 | `pipelines/direct-ingest/` | Elemental → EC2 | **production** — the template above |

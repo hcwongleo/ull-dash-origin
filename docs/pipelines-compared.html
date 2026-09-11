@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two ingest paths, compared — ULL-DASH origin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@0,9..144,300..900,0..100,0..1;1,9..144,300..900,0..100,0..1&family=Instrument+Sans:wght@400;500;600&family=Martian+Mono:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#f6f4ef; --paper2:#fffdf9; --ink:#15140e; --ink2:#3c3a30; --ink3:#7a7768;
+  --rule:#ddd8cc; --rule2:#c7c1b1;
+  --prod:#0a5c48; --prod-l:#e4efe9;
+  --test:#a8401a; --test-l:#f6e7df;
+  --warn:#8a6a00;
+  --mono:'Martian Mono',ui-monospace,monospace;
+  --disp:'Fraunces',Georgia,serif;
+  --body:'Instrument Sans',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--body);font-size:16.5px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    linear-gradient(var(--rule) 1px,transparent 1px),
+    linear-gradient(90deg,var(--rule) 1px,transparent 1px);
+  background-size:100% 34px,34px 100%;
+  background-position:-1px -1px;
+  background-blend-mode:multiply;
+}
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(ellipse at 50% 0%,rgba(246,244,239,0) 30%,var(--paper) 78%);
+}
+.wrap{max-width:1000px;margin:0 auto;padding:0 28px;position:relative;z-index:1}
+
+h1{
+  font-family:var(--disp);font-weight:600;font-variation-settings:'SOFT' 40,'WONK' 1,'opsz' 96;
+  font-size:clamp(2.5rem,6.5vw,4.6rem);line-height:.94;letter-spacing:-.03em;margin:0 0 20px;
+}
+h1 em{font-style:italic;font-variation-settings:'SOFT' 80,'WONK' 1}
+h2{
+  font-family:var(--disp);font-weight:600;font-variation-settings:'opsz' 40,'SOFT' 30;
+  font-size:clamp(1.4rem,2.6vw,2rem);letter-spacing:-.02em;margin:0 0 4px;line-height:1.1;
+}
+.kicker{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.22em;text-transform:uppercase;color:var(--ink3);margin:0 0 26px}
+.num{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;color:var(--ink3);margin:0 0 22px;text-transform:uppercase}
+p{margin:0 0 15px;max-width:66ch;color:var(--ink2)}
+p strong{color:var(--ink);font-weight:600}
+code{font-family:var(--mono);font-size:.8em;background:var(--paper2);border:1px solid var(--rule);padding:1px 5px;border-radius:2px;color:var(--ink)}
+header{padding:78px 0 40px}
+.lede{font-size:19.5px;max-width:56ch;color:var(--ink2)}
+section{padding:56px 0;border-top:1px solid var(--rule2)}
+
+/* ─── shared figure shell ─── */
+.fig{background:var(--paper2);border:1px solid var(--rule2);padding:24px;margin:26px 0 12px}
+.fig + .note{font-family:var(--mono);font-size:10.5px;color:var(--ink3);line-height:1.7;margin:0}
+.lane{margin-bottom:26px}
+.lane:last-child{margin-bottom:0}
+.tag{display:flex;align-items:baseline;gap:9px;font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:11px}
+.tag b{font-weight:600}
+.pill{font-size:8.5px;padding:2px 6px;border-radius:2px;letter-spacing:.12em}
+.pill.p{background:var(--prod-l);color:var(--prod)}
+.pill.t{background:var(--test-l);color:var(--test)}
+
+/* ─── topology ─── */
+.rail{display:flex;align-items:center;gap:0}
+.node{
+  flex:0 0 auto;background:var(--paper);border:1px solid var(--rule2);padding:9px 11px;
+  font-family:var(--mono);font-size:9.5px;line-height:1.45;position:relative;z-index:2;min-width:88px;
+}
+.node b{display:block;font-size:10px;font-weight:600;letter-spacing:.02em;margin-bottom:2px}
+.node.enc{border-color:var(--ink3)}
+.node.p{border-color:var(--prod);background:var(--prod-l)}
+.node.t{border-color:var(--test);background:var(--test-l)}
+.wire{flex:1 1 auto;height:1px;background:var(--rule2);position:relative;min-width:30px;z-index:1}
+.wire i{position:absolute;top:50%;width:5px;height:5px;margin-top:-2.5px;border-radius:50%;background:var(--ink);animation:flow 2.4s linear infinite}
+.wire.p i{background:var(--prod)}
+.wire.t i{background:var(--test)}
+.wire i:nth-child(2){animation-delay:.6s}
+.wire i:nth-child(3){animation-delay:1.2s}
+.wire i:nth-child(4){animation-delay:1.8s}
+@keyframes flow{from{left:-3px;opacity:0}10%{opacity:1}90%{opacity:1}to{left:calc(100% - 2px);opacity:0}}
+.hopcount{font-family:var(--mono);font-size:9.5px;color:var(--ink3);margin-top:9px;letter-spacing:.1em}
+
+/* ─── write access ─── */
+.access{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule2);border:1px solid var(--rule2)}
+.half{background:var(--paper2);padding:20px}
+.half h4{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.15em;text-transform:uppercase;margin:0 0 16px}
+.half.p h4{color:var(--prod)}
+.half.t h4{color:var(--test)}
+.origin-box{
+  font-family:var(--mono);font-size:9.5px;text-align:center;padding:10px 0;margin-top:16px;
+  border:1px solid var(--rule2);background:var(--paper);
+}
+.half.p .origin-box{border-color:var(--prod)}
+.half.t .origin-box{border-color:var(--test)}
+.writers{display:flex;flex-wrap:wrap;gap:5px;min-height:74px;align-content:flex-start}
+.w{
+  font-family:var(--mono);font-size:8px;padding:3px 5px;border:1px solid var(--rule2);
+  background:var(--paper);color:var(--ink3);
+}
+.half.t .w{border-color:var(--test);color:var(--test);animation:pulse 2.6s ease-in-out infinite}
+.half.t .w:nth-child(2){animation-delay:.2s}.half.t .w:nth-child(3){animation-delay:.4s}
+.half.t .w:nth-child(4){animation-delay:.6s}.half.t .w:nth-child(5){animation-delay:.8s}
+.half.t .w:nth-child(6){animation-delay:1s}.half.t .w:nth-child(7){animation-delay:1.2s}
+.half.t .w:nth-child(8){animation-delay:1.4s}.half.t .w:nth-child(9){animation-delay:1.6s}
+@keyframes pulse{0%,100%{background:var(--paper);opacity:.55}50%{background:var(--test-l);opacity:1}}
+.half.p .w{border-color:var(--prod);color:var(--prod);background:var(--prod-l)}
+
+/* ─── coalescing ─── */
+.track{height:34px;border:1px solid var(--rule2);background:var(--paper);position:relative;overflow:hidden}
+.smooth{position:absolute;inset:0 auto 0 0;width:0;background:repeating-linear-gradient(90deg,var(--prod) 0 2px,transparent 2px 9px);animation:grow 5s linear infinite}
+.stepped{position:absolute;inset:0 auto 0 0;width:0;background:repeating-linear-gradient(90deg,var(--test) 0 2px,transparent 2px 9px);animation:step 5s steps(8,end) infinite}
+@keyframes grow{0%{width:0}80%{width:100%}100%{width:100%}}
+@keyframes step{0%{width:0}80%{width:100%}100%{width:100%}}
+.ticks{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--ink3);margin-top:6px;letter-spacing:.08em}
+.unres{
+  font-family:var(--mono);font-size:10px;color:var(--warn);border:1px dashed var(--warn);
+  padding:11px 13px;margin-top:18px;line-height:1.65;
+}
+
+/* ─── fan-out ─── */
+.fan{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule2);border:1px solid var(--rule2)}
+.viewers{display:flex;gap:3px;flex-wrap:wrap;margin-bottom:12px}
+.v{width:13px;height:13px;border:1px solid var(--rule2);background:var(--paper)}
+.half.p .v{border-color:var(--prod)}
+.half.t .v{border-color:var(--test);animation:hit 1.8s ease-in-out infinite}
+.half.t .v:nth-child(odd){animation-delay:.3s}
+.half.t .v:nth-child(3n){animation-delay:.6s}
+@keyframes hit{0%,100%{background:var(--paper)}50%{background:var(--test)}}
+.edge{font-family:var(--mono);font-size:9px;text-align:center;padding:7px 0;border:1px solid var(--rule2);background:var(--paper);margin-bottom:10px;letter-spacing:.1em}
+.half.p .edge{border-color:var(--prod);background:var(--prod-l);color:var(--prod)}
+.arrows{font-family:var(--mono);font-size:13px;text-align:center;color:var(--ink3);letter-spacing:.35em;margin:7px 0}
+.half.t .arrows{color:var(--test)}
+.half.p .arrows{color:var(--prod)}
+
+/* ─── table ─── */
+table{width:100%;border-collapse:collapse;margin:26px 0 10px;font-size:14px}
+th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+thead th{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink3);border-bottom:1px solid var(--rule2);font-weight:600}
+tbody th{font-weight:500;color:var(--ink);width:27%}
+td.p{color:var(--prod)}
+td.t{color:var(--test)}
+td .mono,th .mono{font-family:var(--mono);font-size:11.5px}
+tr:hover td,tr:hover th{background:var(--paper2)}
+
+.verdict{border-left:3px solid var(--prod);background:var(--paper2);padding:20px 22px;margin:26px 0 10px}
+.verdict h3{font-family:var(--disp);font-size:1.15rem;font-weight:600;margin:0 0 9px}
+.verdict p:last-child{margin-bottom:0}
+.caution{border-left-color:var(--test)}
+footer{border-top:1px solid var(--rule2);padding:28px 0 60px;font-family:var(--mono);font-size:10px;color:var(--ink3);letter-spacing:.06em;line-height:1.9}
+
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important}
+  .smooth,.stepped{width:100%}
+  .wire i{opacity:.5}
+}
+@media(max-width:760px){
+  .access,.fan{grid-template-columns:1fr}
+  .rail{flex-wrap:wrap;gap:6px}.wire{min-width:100%;height:1px}.node{flex:1 1 auto}
+  tbody th{width:auto}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="kicker">ULL-DASH origin &middot; v0.2.0</p>
+  <h1>Two ways in.<br><em>One</em> belongs in production.</h1>
+  <p class="lede">Both pipelines put the same origin behind the same playback CDN. They differ only in how the encoder reaches it &mdash; and that one difference decides who is allowed to write to your live stream.</p>
+</header>
+
+<!-- 1 ─────────────────────────────── -->
+<section>
+  <p class="num">01 &middot; Topology</p>
+  <h2>The ingest CDN adds a hop and buys no fan-out</h2>
+  <p>A CDN earns its keep by serving many readers from one origin fetch. <strong>Ingest has exactly one writer.</strong> Putting CloudFront in front of it adds a hop, a TLS terminate and re-originate, and an edge function invocation on every manifest &mdash; with nothing to fan out.</p>
+
+  <div class="fig">
+    <div class="lane">
+      <div class="tag"><b>direct-ingest</b><span class="pill p">production</span></div>
+      <div class="rail">
+        <div class="node enc"><b>Elemental</b>chunked PUT</div>
+        <div class="wire p"><i></i><i></i><i></i><i></i></div>
+        <div class="node p"><b>EC2 origin</b>read-while-write<br>in RAM</div>
+        <div class="wire p"><i></i><i></i><i></i><i></i></div>
+        <div class="node p"><b>CloudFront</b>playback</div>
+        <div class="wire p"><i></i><i></i><i></i><i></i></div>
+        <div class="node"><b>players</b></div>
+      </div>
+      <p class="hopcount">1 stack &middot; 1 region &middot; 10 parameters, 1 required</p>
+    </div>
+
+    <div class="lane">
+      <div class="tag"><b>cdn-ingest-testing</b><span class="pill t">testing only</span></div>
+      <div class="rail">
+        <div class="node enc"><b>Elemental</b>chunked PUT</div>
+        <div class="wire t"><i></i><i></i><i></i><i></i></div>
+        <div class="node t"><b>CloudFront</b>ingest<br>+ Lambda@Edge</div>
+        <div class="wire t"><i></i><i></i><i></i><i></i></div>
+        <div class="node t"><b>EC2 origin</b>read-while-write<br>in RAM</div>
+        <div class="wire t"><i></i><i></i><i></i><i></i></div>
+        <div class="node t"><b>CloudFront</b>playback</div>
+        <div class="wire t"><i></i><i></i><i></i><i></i></div>
+        <div class="node"><b>players</b></div>
+      </div>
+      <p class="hopcount">3 stacks &middot; 2 regions &middot; Lambda@Edge only replicates from us-east-1</p>
+    </div>
+  </div>
+  <p class="note">Both paths keep the playback CDN. That is where fan-out actually happens.</p>
+</section>
+
+<!-- 2 ─────────────────────────────── -->
+<section>
+  <p class="num">02 &middot; Who can write &mdash; the decisive difference</p>
+  <h2>An ingest CDN means any distribution can PUT</h2>
+  <p>The origin has <strong>no authentication</strong>. Access is controlled entirely by the security group. Put CloudFront in front of ingest and that group must accept <code>PUT</code>, <code>POST</code> and <code>DELETE</code> from CloudFront&rsquo;s <em>entire</em> origin-facing prefix list &mdash; because that is the only source address CloudFront presents.</p>
+  <p>Which means <strong>any CloudFront distribution in the world</strong>, in anyone&rsquo;s account, is inside your write perimeter.</p>
+
+  <div class="fig">
+    <div class="access">
+      <div class="half t">
+        <h4>cdn-ingest &mdash; prefix list</h4>
+        <div class="writers">
+          <span class="w">your ingest CF</span><span class="w">any CF</span><span class="w">any CF</span>
+          <span class="w">any CF</span><span class="w">any CF</span><span class="w">any CF</span>
+          <span class="w">any CF</span><span class="w">any CF</span><span class="w">any CF</span>
+        </div>
+        <div class="arrows">&darr; &darr; &darr; &darr; &darr;</div>
+        <div class="origin-box">PUT &middot; DELETE permitted</div>
+      </div>
+      <div class="half p">
+        <h4>direct-ingest &mdash; /32</h4>
+        <div class="writers">
+          <span class="w">your encoder</span>
+        </div>
+        <div class="arrows">&darr;</div>
+        <div class="origin-box">PUT &middot; DELETE permitted</div>
+      </div>
+    </div>
+  </div>
+  <p class="note">direct-ingest restricts writes to <code>EncoderCidr</code>, and the template refuses <code>0.0.0.0/0</code> outright.<br>Playback stays on the prefix list either way &mdash; but limited to GET, HEAD and OPTIONS.</p>
+
+  <div class="verdict caution">
+    <h3>The honest counterweight</h3>
+    <p>Direct ingest is <strong>plaintext HTTP</strong>. The feed is readable in transit and injectable by anyone who can reach that address. TLS on the origin needs a real domain and a publicly trusted certificate, because CloudFront rejects a self-signed certificate on a custom origin &mdash; worth doing, and separate work.</p>
+    <p>If the encoder is on-premises, use Direct Connect or a VPN. Do not push a live feed across the open internet because a template made it easy.</p>
+  </div>
+</section>
+
+<!-- 3 ─────────────────────────────── -->
+<section>
+  <p class="num">03 &middot; Latency &mdash; unresolved</p>
+  <h2>Does the ingest CDN batch the chunks?</h2>
+  <p>Removing the edge function and the POP hop is worth <strong>tens of milliseconds</strong> against a 3&ndash;4 second target. Nobody perceives that. Only one question could actually matter: whether the ingest CDN <em>coalesces</em> the encoder&rsquo;s 0.2 s fragments into larger writes.</p>
+
+  <div class="fig">
+    <div class="lane">
+      <div class="tag"><b>pass-through</b><span class="pill p">0.2 s fragments arrive as sent</span></div>
+      <div class="track"><div class="smooth"></div></div>
+      <div class="ticks"><span>segment starts</span><span>the reader is never far behind the writer</span><span>2.0 s</span></div>
+    </div>
+    <div class="lane">
+      <div class="tag"><b>coalesced</b><span class="pill t">batched into ~0.5 s writes</span></div>
+      <div class="track"><div class="stepped"></div></div>
+      <div class="ticks"><span>segment starts</span><span>the reader waits for each batch &mdash; up to ~0.5 s of added latency</span><span>2.0 s</span></div>
+    </div>
+  </div>
+
+  <div class="unres">
+    NOT MEASURED. An earlier observation saw the origin receiving ~51 KB every ~0.5 s
+    through the ingest CDN &mdash; but that 0.5 s may have been the sampling interval,
+    not CloudFront&rsquo;s behaviour. It was never isolated.<br><br>
+    To settle it: run both pipelines from one encoder and sample a single segment&rsquo;s
+    size every 20 ms at each origin. Steps mean coalescing; a smooth ramp means
+    pass-through. <b>Do not ship a latency claim without this.</b>
+  </div>
+</section>
+
+<!-- 4 ─────────────────────────────── -->
+<section>
+  <p class="num">04 &middot; Playback</p>
+  <h2>One caches at the edge; the other hits the origin every time</h2>
+  <p>This is a deliberate difference, not an oversight. The testing pipeline disables playback caching so that every request is observable at the origin &mdash; correct for measurement, wrong for scale.</p>
+
+  <div class="fig">
+    <div class="fan">
+      <div class="half t">
+        <h4>cdn-ingest &mdash; CachingDisabled</h4>
+        <div class="viewers">
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+        </div>
+        <div class="arrows">&darr; &darr; &darr; &darr; &darr; &darr;</div>
+        <div class="origin-box">every request reaches the origin</div>
+      </div>
+      <div class="half p">
+        <h4>direct-ingest &mdash; segments 6 h</h4>
+        <div class="viewers">
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+          <span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span><span class="v"></span>
+        </div>
+        <div class="edge">edge cache absorbs them</div>
+        <div class="arrows">&darr;</div>
+        <div class="origin-box">one fetch per segment</div>
+      </div>
+    </div>
+  </div>
+  <p class="note">Manifest TTL is 1 s in production, at or below the encoder&rsquo;s <code>minimumUpdatePeriod</code>: a stale manifest moves the player&rsquo;s idea of the live edge.<br>403, 404 and 5xx are never cached &mdash; a segment asked for a moment early exists a moment later.<br>The 6 h segment TTL is safe only while segment names carry a per-run token. Recycled names would serve stale video.</p>
+</section>
+
+<!-- 5 ─────────────────────────────── -->
+<section>
+  <p class="num">05 &middot; Side by side</p>
+  <h2>Everything that differs</h2>
+  <table>
+    <thead><tr><th></th><th>direct-ingest</th><th>cdn-ingest-testing</th></tr></thead>
+    <tbody>
+      <tr><th>Purpose</th><td class="p">production</td><td class="t">measurement only</td></tr>
+      <tr><th>Who may write</th><td class="p">encoder <span class="mono">/32</span></td><td class="t">any CloudFront distribution</td></tr>
+      <tr><th>Ingest encryption</th><td class="t">none &mdash; plaintext HTTP</td><td class="p">HTTPS to the edge</td></tr>
+      <tr><th>Stacks / regions</th><td class="p">1 / 1</td><td class="t">3 / 2</td></tr>
+      <tr><th>Required parameters</th><td class="p"><span class="mono">EncoderCidr</span> only</td><td class="t">plus the Lambda version ARN</td></tr>
+      <tr><th><code>UTCTiming</code></th><td class="p">injected by the origin</td><td>injected by Lambda@Edge</td></tr>
+      <tr><th><code>ServiceDescription</code></th><td class="p">not injected &mdash; encoder is the only latency source</td><td class="t">injected, and its 4000 ms conflicted with the encoder&rsquo;s <span class="mono">PT3S</span></td></tr>
+      <tr><th>Playback caching</th><td class="p">segments 6 h, manifest 1 s</td><td class="t">disabled &mdash; every viewer hits the origin</td></tr>
+      <tr><th>Latency</th><td colspan="2">equivalent, to within tens of milliseconds. The coalescing question above is unresolved.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 6 ─────────────────────────────── -->
+<section>
+  <p class="num">06 &middot; Verdict</p>
+  <h2>Use direct-ingest. Keep the other for two jobs.</h2>
+
+  <div class="verdict">
+    <h3>direct-ingest &mdash; production</h3>
+    <p>Fewer moving parts, and writes restricted to one address instead of a global prefix list. Deploy one template, fill in one field. The origin adds <code>UTCTiming</code> itself, so nothing is needed on the encoder.</p>
+    <p>Its real cost is plaintext ingest. Treat that as a networking decision, not a checkbox.</p>
+  </div>
+
+  <div class="verdict caution">
+    <h3>cdn-ingest-testing &mdash; keep, do not deploy for production</h3>
+    <p>It is the only way to answer the coalescing question, and the only way to exercise the Lambda@Edge manifest path. Its origin is built from the same tag as production, so the ingest path is the only variable &mdash; it previously cloned upstream, which made the origin a variable too, and an unpatched one.</p>
+  </div>
+</section>
+
+<footer>
+  Measured on the deployed origins, not estimated. Latency figures are equivalent between pipelines;
+  the coalescing question is explicitly unresolved.<br>
+  Origin: 18 tests, race-clean &middot; upstream <span style="font-family:var(--mono)">mjneil/go-chunked-streaming-server@fa4b736</span>, MIT.<br>
+  Not battle-tested: hours against one live encoder, not weeks under load. Content is held in RAM, so any
+  restart requires an Elemental output restart before new viewers can play.
+</footer>
+
+</div>
+</body>
+</html>
