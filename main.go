@@ -30,6 +30,15 @@ var (
 	ingestIdleTimeoutS = flag.Int64("ingest-idle-timeout", 10, "Abort an ingest whose body has been silent this many seconds. Bounds silence, not total duration, so long chunked PUTs are unaffected. 0 disables, which leaks a goroutine and socket per half-open encoder connection")
 	adminAddr          = flag.String("admin-addr", "127.0.0.1:9095", "Address for the local-only health and metrics listener. Empty disables it")
 	logLevelName       = flag.String("log-level", "warn", "Log level: error, warn, info, debug. Per-request logging is debug-only")
+
+	// A DASH player with no UTCTiming falls back to the device clock, mis-computes
+	// the live edge and jumps gaps. Elemental Live does not emit it, so the origin
+	// adds it as the manifest is ingested. Empty disables injection.
+	//
+	// A constant, so unlike a latency target it cannot fall out of step when the
+	// encoder is reconfigured - which is why this, and not ServiceDescription, is
+	// the one thing the origin rewrites.
+	utcTimingURL = flag.String("utc-timing", "https://time.akamai.com/?iso", "URL injected as the DASH UTCTiming value on manifest ingest, using the http-iso scheme. Empty disables injection")
 )
 
 func checkError(err error) {
@@ -53,6 +62,7 @@ func main() {
 		IngestIdleTimeout:            time.Duration(*ingestIdleTimeoutS) * time.Second,
 		AdminAddr:                    *adminAddr,
 		LogLevel:                     *logLevelName,
+		UTCTiming:                    *utcTimingURL,
 		GitSHA:                       gitSHA,
 	}))
 }

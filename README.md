@@ -44,8 +44,12 @@ Then read the **Outputs** tab:
 | `PlayerUrl` | the `.mpd` your player opens |
 
 **In Elemental Live, chunked transfer encoding must be ON.** Without it there is
-no low latency at all and nothing reports an error. Also set `UTCTiming` — see
+no low latency at all and nothing reports an error — see
 [Encoder settings](docs/operations.md#encoder-settings).
+
+`UTCTiming` needs nothing on the encoder: the origin injects it as the manifest is
+ingested, because Elemental Live does not emit it and a player without a timing
+source mis-computes the live edge.
 
 Everything else has a working default. Full guide, including monitoring,
 upgrades and security: **[docs/operations.md](docs/operations.md)**
@@ -178,9 +182,6 @@ taken.
   certificate on a custom origin. Use Direct Connect or a VPN from an on-premises
   encoder.
 - **No EC2 auto-recovery.** A failed host needs a human.
-- **`UTCTiming` must be configured on the encoder** when using `direct-ingest`.
-  Without a timing source a player trusts the device clock, mis-computes the live
-  edge and jumps gaps — observed as `dash.js Error 16` followed by a 6 s gap jump.
 
 ## Licence
 

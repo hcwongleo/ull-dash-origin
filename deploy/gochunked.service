@@ -31,7 +31,8 @@ ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -p /opt/gochunked/content \
   -ingest-idle-timeout 10 \
   -admin-addr 127.0.0.1:9095 \
-  -log-level warn
+  -log-level warn \
+  -utc-timing https://time.akamai.com/?iso
 
 Restart=always
 RestartSec=2

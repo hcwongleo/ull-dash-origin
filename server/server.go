@@ -21,6 +21,7 @@ type Options struct {
 	AdminAddr                    string
 	LogLevel                     string
 	GitSHA                       string
+	UTCTiming                    string
 	Port                         int
 	CertFilePath                 string
 	KeyFilePath                  string
@@ -44,6 +45,12 @@ func StartHTTPServer(o Options) error {
 	doCleanupBasedOnCacheHeaders := o.DoCleanupBasedOnCacheHeaders
 
 	SetLogLevel(o.LogLevel)
+	SetUTCTiming(o.UTCTiming)
+	if o.UTCTiming == "" {
+		logWarnf("UTCTiming injection disabled: players will fall back to the device clock, which mis-computes the live edge")
+	} else {
+		log.Printf("UTCTiming injected on manifest ingest: %s", o.UTCTiming)
+	}
 	SetIngestIdleTimeout(o.IngestIdleTimeout)
 	log.Printf("ingest idle timeout: %s", o.IngestIdleTimeout)
 	StartAdminListener(o.AdminAddr, o.GitSHA)

@@ -111,7 +111,18 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 	// The body carries an idle deadline so a half-open connection cannot pin this
 	// goroutine and its socket forever.
 	body := withIdleDeadline(w, r)
-	written, copyErr := io.Copy(f, body)
+
+	var written int64
+	var copyErr error
+	if isManifest(name) {
+		// A manifest is rewritten to add UTCTiming, which needs the whole body, so
+		// it is buffered. Safe only because a manifest is a few kilobytes and is
+		// complete the instant it arrives - buffering a media segment here would
+		// destroy read-while-write, which is the entire point of this server.
+		written, copyErr = copyManifest(f, body)
+	} else {
+		written, copyErr = io.Copy(f, body)
+	}
 	body.Close()
 	// Close before anything else, so readers parked on this file are released
 	// whether the ingest succeeded or not.
@@ -211,6 +222,44 @@ func addHeaders(w http.ResponseWriter, headersSrc http.Header) {
 			w.Header().Set(name, value)
 		}
 	}
+}
+
+// copyManifest buffers a manifest, injects UTCTiming, and writes the result.
+//
+// On any doubt it falls back to storing exactly what arrived: an oversized body
+// is streamed through unmodified rather than held, and a read error is returned
+// with whatever was written so the caller's existing abort handling applies.
+func copyManifest(f *File, body io.Reader) (int64, error) {
+	buf, err := io.ReadAll(io.LimitReader(body, manifestSizeCap))
+	if err != nil {
+		n, _ := f.Write(buf)
+
+		return int64(n), err
+	}
+
+	// Larger than any real manifest: store it as-is and stream the remainder,
+	// rather than buffering something unbounded.
+	if len(buf) == manifestSizeCap {
+		n, werr := f.Write(buf)
+		if werr != nil {
+			return int64(n), werr
+		}
+		rest, cerr := io.Copy(f, body)
+
+		return int64(n) + rest, cerr
+	}
+
+	out := injectUTCTiming(buf)
+	if len(out) != len(buf) {
+		// The stored headers came from the PUT request, so Content-Length now
+		// describes the body we were given, not the one we will serve. Left in
+		// place it truncates every response. Dropping it lets net/http set the
+		// correct value.
+		f.DropHeader("Content-Length")
+	}
+	n, werr := f.Write(out)
+
+	return int64(n), werr
 }
 
 func getMaxAgeOr(s string, def int64) int64 {

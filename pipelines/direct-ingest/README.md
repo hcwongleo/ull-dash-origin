@@ -86,18 +86,17 @@ plaintext live feed across the open internet because a template made it easy.
 
 ## What you lose by dropping the Lambda
 
-It injected two things Elemental Live does not emit:
+It injected two things Elemental Live does not emit. Only one is actually lost.
 
-- `UTCTiming` — configure this on the encoder instead. Without a timing source a
-  player trusts the local device clock, mis-computes the live edge, and jumps
-  gaps. This has already been observed in this project.
-- `ServiceDescription` with `Latency@target` and a `PlaybackRate` range — gives
-  the player an explicit convergence goal.
-
-Losing the second is arguably a **gain**: the injected 4000 ms target conflicted
-with the encoder's own `suggestedPresentationDelay="PT3S"`, and a player told two
-different targets hunts between them. With no injection there is exactly one
-source of truth — the encoder.
+- `UTCTiming` — **now done by the origin** on manifest ingest, so nothing needs
+  configuring on the encoder. Without a timing source a player trusts the local
+  device clock, mis-computes the live edge and jumps gaps; observed in this
+  project as `dash.js Error 16` followed by a 6 s gap jump.
+- `ServiceDescription` with `Latency@target` and a `PlaybackRate` range — this one
+  is genuinely gone, and losing it is arguably a **gain**. The injected 4000 ms
+  conflicted with the encoder's own `suggestedPresentationDelay="PT3S"`, and a
+  player told two different targets hunts between them. The encoder is now the
+  single source of truth for latency.
 
 ## Deploy
 

@@ -58,12 +58,22 @@ an explicit `AmiId=ami-xxxx` on updates to hold the instance still.
 | Segment control | Segmented Files | not single-file |
 | `availabilityTimeOffset` | ~1.8 s, `availabilityTimeComplete=false` | low-latency signalling |
 | `suggestedPresentationDelay` | 3–4 s | the player's target |
-| **`UTCTiming`** | **configure it** | see below |
+| `UTCTiming` | leave it | the origin injects it — see below |
 | Segment naming | must include a per-run token | see caching note |
 
-**`UTCTiming` is not optional.** With no timing source a player trusts the local
-device clock, mis-computes the live edge, and jumps gaps in playback. We observed
-exactly this during testing (`dash.js Error 16`, followed by a 6 s gap jump).
+**`UTCTiming` is handled by the origin.** With no timing source a player trusts
+the local device clock, mis-computes the live edge, and jumps gaps — observed
+during testing as `dash.js Error 16` followed by a 6 s gap jump. Elemental Live
+does not emit `UTCTiming`, so the origin adds it as the manifest is ingested.
+
+It defaults to `https://time.akamai.com/?iso`. Change it with `-utc-timing <url>`,
+or set that to empty to disable injection if your encoder already supplies one.
+The origin never overwrites a `UTCTiming` that is already present.
+
+The origin deliberately does **not** inject `ServiceDescription`/`Latency@target`.
+An earlier build did, and its hardcoded 4000 ms disagreed with the encoder's
+`suggestedPresentationDelay` of `PT3S`; a player given two targets hunts between
+them. The encoder stays the single source of truth for latency.
 
 **Confirm chunked transfer is actually on** — this is the one silent failure:
 
@@ -111,6 +121,7 @@ first time the encoder is reconfigured.
 -ingest-idle-timeout 10   abort an ingest silent this long
 -admin-addr 127.0.0.1:9095
 -log-level warn
+-utc-timing https://time.akamai.com/?iso    injected into manifests on ingest
 ```
 
 **There is no retention setting, on purpose.** Memory is bounded by the encoder's

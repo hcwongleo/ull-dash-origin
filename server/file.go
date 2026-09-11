@@ -124,6 +124,19 @@ func NewFile(name string, headers http.Header, maxAgeS int64) *File {
 	return &f
 }
 
+// DropHeader removes a stored response header.
+//
+// Needed because the headers served with an object are copied from the PUT
+// request. Rewriting the body invalidates any header describing its length: a
+// stale Content-Length makes net/http truncate the response, so a player sees a
+// short read rather than a manifest.
+func (f *File) DropHeader(key string) {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+
+	f.headers.Del(key)
+}
+
 func (f *File) GetContentType() string {
 	return f.headers.Get("Content-Type")
 }

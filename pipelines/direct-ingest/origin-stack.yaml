@@ -28,10 +28,13 @@ Description: >-
 #
 # WHAT YOU GIVE UP
 #
-#   1. ServiceDescription / UTCTiming injection. Elemental Live emits neither by
-#      default. Configure UTCTiming on the encoder. Losing the injected
-#      Latency@target is arguably a gain: the injected 4000ms conflicted with the
-#      encoder's own suggestedPresentationDelay, which makes players hunt.
+#   1. ServiceDescription with Latency@target. Losing it is arguably a gain: the
+#      injected 4000ms conflicted with the encoder's own
+#      suggestedPresentationDelay of PT3S, and a player given two targets hunts
+#      between them.
+#
+#      UTCTiming is NOT lost - the origin injects it on manifest ingest, so
+#      nothing has to be configured on the encoder.
 #   2. CloudFront absorbing a flood on the ingest path. Mitigated far better by
 #      EncoderCidr below, which is a much tighter control than the prefix list.
 #
@@ -115,7 +118,7 @@ Parameters:
 
   ReleaseTag:
     Type: String
-    Default: v0.1.1
+    Default: v0.2.0
     Description: >-
       Git tag to build. Pinned, so a redeploy always produces the same binary.
       The instance clones this tag and compiles it at first boot - dependencies
