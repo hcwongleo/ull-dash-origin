@@ -2,7 +2,6 @@ package server
 
 import (
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -64,8 +63,16 @@ func GetHandler(waitingRequests *WaitingRequests, cors *Cors, basePath string, w
 		w.Header().Set("Transfer-Encoding", "chunked")
 	}
 
+	rc := f.NewReadCloser(r.Context(), basePath, w)
+	if rc == nil {
+		// Only reachable on the disk path, when the backing file has gone missing.
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	defer rc.Close()
+
 	w.WriteHeader(http.StatusOK)
-	io.Copy(ChunkedResponseWriter{w}, f.NewReadCloser(r.Context(), basePath, w))
+	io.Copy(ChunkedResponseWriter{w}, rc)
 }
 
 // HeadHandler Sends if file exists
@@ -104,7 +111,7 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 	// The body carries an idle deadline so a half-open connection cannot pin this
 	// goroutine and its socket forever.
 	body := withIdleDeadline(w, r)
-	_, copyErr := io.Copy(f, body)
+	written, copyErr := io.Copy(f, body)
 	body.Close()
 	// Close before anything else, so readers parked on this file are released
 	// whether the ingest succeeded or not.
@@ -121,7 +128,7 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 		FilesLock.Unlock()
 
 		PutAbortedTotal.Add(1)
-		logWarnf("ingest of %s aborted after %d bytes, discarded: %v", name, f.Len(), copyErr)
+		logWarnf("ingest of %s aborted after %d bytes, discarded: %v", name, written, copyErr)
 
 		addCors(w, cors)
 		w.WriteHeader(http.StatusBadRequest)

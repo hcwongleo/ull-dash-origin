@@ -2,5 +2,6 @@ content/
 bin/
 certs/
 .vscode/
+
 # Hand-assembled for offline dev builds; regenerate with `go mod vendor` before release.
 vendor/

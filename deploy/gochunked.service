@@ -1,0 +1,63 @@
+[Unit]
+Description=go-chunked-streaming-server (ULL-DASH origin)
+After=network-online.target
+Wants=network-online.target
+
+# StartLimitIntervalSec=0 disables systemd's start-rate limiter. The default gives
+# up after 5 restarts in 10s and leaves the unit dead — which is precisely the
+# behaviour you do not want at 03:00, because a crash loop that would have cleared
+# itself becomes a permanent outage instead.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=gochunked
+Group=gochunked
+
+# Flags are deliberately limited to ones that do NOT depend on the encoder's DASH
+# configuration. Anything derived from availabilityTimeOffset, segment duration or
+# timeShiftBufferDepth becomes silently wrong the first time Elemental is
+# reconfigured, so retention and read-wait are left off:
+#
+#   no -d : the encoder issues its own DELETEs for expired segments, which is what
+#           bounds memory. Measured: 27,507 DELETEs in one 5h session.
+#   no -w : holding a GET for a not-yet-present segment buys ~0.2s of latency and
+#           costs visible jitter, because the hold must be sized against
+#           availabilityTimeOffset to avoid 404ing requests the manifest invites.
+ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
+  -r \
+  -i 9094 \
+  -o /opt/gochunked/cors.json \
+  -p /opt/gochunked/content \
+  -ingest-idle-timeout 10 \
+  -admin-addr 127.0.0.1:9095 \
+  -log-level warn
+
+Restart=always
+RestartSec=2
+
+# A guard, not a working limit. Steady state with the encoder's DELETEs is ~1.2GB;
+# GOMEMLIMIT makes Go collect harder as it approaches the ceiling so that a slow
+# leak shows up as CPU rather than as an OOM kill, and MemoryMax stops a runaway
+# from taking the host down with it.
+Environment=GOMEMLIMIT=3500MiB
+MemoryMax=4G
+
+# Filesystem hardening. The process needs to read its config and write content;
+# nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gochunked/content
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+# Journald only; nothing ships to CloudWatch Logs, where per-request volume would
+# cost $150-250/month. journald self-caps at 10% of the filesystem.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

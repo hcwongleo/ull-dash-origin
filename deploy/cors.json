@@ -1,0 +1,5 @@
+{
+  "AllowedMethods": ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+  "AllowedOrigins": ["*"],
+  "AllowedHeaders": [""]
+}

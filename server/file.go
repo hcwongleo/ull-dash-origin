@@ -2,15 +2,14 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +30,8 @@ type FileReadCloser struct {
 	// it is optional: the callback is released anyway once ctx is done, and a
 	// request context always completes.
 	stopWake func() bool
+	// closed makes Close idempotent, so the readersActive gauge cannot go negative.
+	closed atomic.Bool
 	*File
 }
 
@@ -69,6 +70,14 @@ func (r *FileReadCloser) Read(p []byte) (int, error) {
 // *File, so without this method closing a reader would set eof on the file and
 // silently truncate a segment still being ingested for every other reader.
 func (r *FileReadCloser) Close() error {
+	// Guard against a double Close: net/http may close a body more than once, and
+	// decrementing twice would drive the gauge negative.
+	if r.closed.Swap(true) {
+		return nil
+	}
+
+	readersActive.Add(-1)
+
 	if r.stopWake != nil {
 		r.stopWake()
 	}
@@ -110,7 +119,7 @@ func NewFile(name string, headers http.Header, maxAgeS int64) *File {
 
 	contentType := f.GetContentType()
 
-	log.Println("NEW File Content-Type " + contentType)
+	logDebugf("new file, Content-Type %q", contentType)
 
 	return &f
 }
@@ -136,13 +145,15 @@ func (f *File) NewReadCloser(ctx context.Context, baseDir string, w http.Respons
 		name := path.Join(baseDir, f.Name)
 		file, err := os.Open(name)
 		if err != nil {
-			panic(err)
+			logErrorf("opening %s from disk: %v", name, err)
+			return nil
 		}
-		fmt.Println("Skipping file reading and reading from disk")
+		logDebugf("serving %s from disk", f.Name)
 		return file
 	}
 
-	fmt.Println("Reading from memory")
+	logDebugf("serving %s from memory", f.Name)
+	readersActive.Add(1)
 	r := &FileReadCloser{
 		offset: 0,
 		w:      w,
@@ -169,6 +180,9 @@ func (f *File) Write(p []byte) (int, error) {
 	f.lock.Lock()
 	f.buffer = append(f.buffer, p...)
 	f.lock.Unlock()
+
+	noteIngest(len(p))
+
 	f.cond.Broadcast()
 	return len(p), nil
 }

@@ -20,9 +20,8 @@ func TestHalfOpenIngestIsAborted(t *testing.T) {
 	defer SetIngestIdleTimeout(0)
 
 	cors := NewCors()
-	retention := Retention{AgeDefaultS: 120, AgeFloorS: 120, AgeCapS: 300}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		PostHandler(nil, true, cors, "", retention, w, r)
+		PostHandler(nil, true, cors, "", w, r)
 	}))
 	defer srv.Close()
 
@@ -71,9 +70,8 @@ func TestSlowButSteadyIngestIsNotAborted(t *testing.T) {
 	defer SetIngestIdleTimeout(0)
 
 	cors := NewCors()
-	retention := Retention{AgeDefaultS: 120, AgeFloorS: 120, AgeCapS: 300}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		PostHandler(nil, true, cors, "", retention, w, r)
+		PostHandler(nil, true, cors, "", w, r)
 	}))
 	defer srv.Close()
 
@@ -102,7 +100,10 @@ func TestSlowButSteadyIngestIsNotAborted(t *testing.T) {
 	if !ok {
 		t.Fatal("a steadily-fed slow ingest was dropped; the deadline is bounding duration, not silence")
 	}
-	if got := f.Bytes(); got != 50 {
+	f.lock.RLock()
+	got := len(f.buffer)
+	f.lock.RUnlock()
+	if got != 50 {
 		t.Errorf("stored %d bytes, want 50 — body was truncated", got)
 	}
 }
