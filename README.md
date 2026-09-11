@@ -21,6 +21,35 @@ diff:
 git log --oneline fa4b736..HEAD -- main.go server/
 ```
 
+## Deploy
+
+One CloudFormation template. It builds the server from this repository at a pinned
+tag, so there is nothing to download, compile or upload first.
+
+1. **Download the template** —
+   [`pipelines/direct-ingest/origin-stack.yaml`](pipelines/direct-ingest/origin-stack.yaml)
+   (open it, then use GitHub's *Download raw file* button)
+2. **AWS console → CloudFormation → Create stack → Upload a template file**
+3. **Enter your Elemental Live public IP** in the one required field
+4. **Create stack**
+
+Takes about 15 minutes. The stack does not report success until the origin is
+actually answering, so `CREATE_COMPLETE` means it is ready.
+
+Then read the **Outputs** tab:
+
+| Output | Use it for |
+|---|---|
+| `IngestDestination` | the DASH output destination in Elemental Live |
+| `PlayerUrl` | the `.mpd` your player opens |
+
+**In Elemental Live, chunked transfer encoding must be ON.** Without it there is
+no low latency at all and nothing reports an error. Also set `UTCTiming` — see
+[Encoder settings](release/CUSTOMER-DEPLOY.md#encoder-settings).
+
+Everything else has a working default. Full guide, including monitoring,
+upgrades and security: **[release/CUSTOMER-DEPLOY.md](release/CUSTOMER-DEPLOY.md)**
+
 ## Status — read this first
 
 This has run for hours against one live Elemental Live encoder, not for weeks
@@ -33,16 +62,20 @@ viewers get 404 on `*init.mp4` until the **encoder output is restarted**. This
 caused two outages during development. It is not yet fixed; see
 [Known gaps](#known-gaps).
 
-## Deploy
+## The two pipelines
 
-```
-pipelines/direct-ingest/          ★ production. Elemental → EC2
-pipelines/cdn-ingest-testing/       testing only. Elemental → CloudFront+Lambda@Edge → EC2
-```
+| | Ingest path | |
+|---|---|---|
+| `pipelines/direct-ingest/` | Elemental → EC2 | **production** — the template above |
+| `pipelines/cdn-ingest-testing/` | Elemental → CloudFront + Lambda@Edge → EC2 | testing only |
 
-Customer-facing instructions: **[release/CUSTOMER-DEPLOY.md](release/CUSTOMER-DEPLOY.md)**
+`direct-ingest` is the production path: a CDN in front of ingest buys nothing,
+because CloudFront's value is fan-out and ingest has exactly one writer. It also
+forces the security group to allow write methods from CloudFront's entire prefix
+list, meaning any distribution in the world could PUT to the origin. Direct
+ingest restricts writes to the encoder's address.
 
-The only parameter with no safe default is the encoder's public IP. Ingest is
+The only parameter with no safe default is that address. Ingest is
 unauthenticated, so `0.0.0.0/0` would let anyone inject or delete segments in a
 live stream; the template rejects it.
 

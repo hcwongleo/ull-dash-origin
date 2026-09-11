@@ -55,6 +55,21 @@ Description: >-
 #   plaintext across the public internet.
 # ---------------------------------------------------------------------------
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: 'Required' }
+        Parameters: [EncoderCidr]
+      - Label: { default: 'Usually leave alone' }
+        Parameters: [ReleaseTag, StreamName, InstanceType, ChannelPrefix]
+      - Label: { default: 'Advanced' }
+        Parameters: [RepoUrl, AmiId, OriginPort, CloudFrontOriginPrefixList, SegmentCacheSeconds]
+    ParameterLabels:
+      EncoderCidr: { default: 'Elemental Live public IP (as a /32)' }
+      ReleaseTag: { default: 'Version to deploy' }
+      StreamName: { default: 'Stream name' }
+      InstanceType: { default: 'Instance size' }
+
 Parameters:
   ChannelPrefix:
     Type: String
@@ -86,30 +101,30 @@ Parameters:
       the constraint. What matters is network egress on playback cache misses.
 
   AmiId:
-    Type: AWS::EC2::Image::Id
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
     Description: >-
-      PINNED ON PURPOSE. Do not switch this back to an
-      AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>. UsePreviousValue preserves
-      the PATH, not the resolved value, so a new Amazon Linux release silently
-      replaced a running origin during an unrelated stack update - which also
-      reverted the binary, because UserData only runs at first boot. Refresh it
-      as a deliberate act:
-        aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 --query Parameter.Value --output text
+      Resolved automatically so nothing has to be looked up by hand.
 
-  ArtifactBucket:
-    Type: String
-    Description: S3 bucket in YOUR account holding the release archive.
+      CAUTION ON STACK UPDATES: this resolves the PATH, not a fixed value, so a
+      later Amazon Linux release will replace the instance during an unrelated
+      stack update. Rebuilding is harmless, but the replacement clears RAM, and
+      Elemental Live only sends initialisation segments at output start - so it
+      needs an encoder output restart. When updating, pass an explicit ami-xxxx
+      to hold the instance still.
 
-  ArtifactKey:
+  ReleaseTag:
     Type: String
+    Default: v0.1.0
     Description: >-
-      Release archive key, e.g. gcss-origin-159f298.zip, as produced by
-      release/build-release.sh. Contains both architectures, install.sh and the
-      systemd unit.
+      Git tag to build. Pinned, so a redeploy always produces the same binary.
+      The instance clones this tag and compiles it at first boot - dependencies
+      are vendored, so it needs GitHub and nothing else.
 
-      Changing this does NOT update a running instance - UserData runs only at
-      first boot. Run install.sh over SSM as well, or the change takes effect
-      only on the next replacement.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/hcwongleo/ull-dash-origin.git
+    Description: Source repository. Override only if you have mirrored it.
 
   OriginPort:
     Type: Number
@@ -262,16 +277,10 @@ Resources:
           - Effect: Allow
             Principal: { Service: ec2.amazonaws.com }
             Action: sts:AssumeRole
+      # SSM only. The build comes from a public git tag, so the instance needs no
+      # S3 access and there is no bucket policy or artifact staging to get wrong.
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Policies:
-        - PolicyName: read-own-artifact
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: s3:GetObject
-                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}/*'
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -284,6 +293,9 @@ Resources:
   # whatever upstream HEAD happens to be that day.
   OriginInstance:
     Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
     Properties:
       InstanceType: !Ref InstanceType
       ImageId: !Ref AmiId
@@ -291,18 +303,46 @@ Resources:
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds: [!Ref OriginSecurityGroup]
       Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin' }]
+      # CreationPolicy so the stack does not report CREATE_COMPLETE while the
+      # compile is still running. Without it an operator sees success and points
+      # an encoder at an origin that is not listening yet.
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          set -xe
-          # The install logic lives in the release archive, not here. UserData runs
-          # only at first boot, so keeping it here would mean provisioning a new
-          # instance and upgrading a running one are two code paths that drift.
-          dnf install -y unzip
-          aws s3 cp "s3://${ArtifactBucket}/${ArtifactKey}" /tmp/release.zip --region ${AWS::Region}
-          rm -rf /tmp/release && mkdir -p /tmp/release
-          unzip -q /tmp/release.zip -d /tmp/release
-          "$(find /tmp/release -name install.sh -maxdepth 2 | head -1)"
+          exec > >(tee /var/log/origin-bootstrap.log) 2>&1
+          set -x
+
+          fail() { /opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} \
+                     --resource OriginInstance --region ${AWS::Region}; exit 1; }
+          trap fail ERR
+
+          dnf install -y golang git
+
+          # A pinned tag, so this builds the same bytes every time. Dependencies
+          # are vendored and GOPROXY is off: the only network dependency is the
+          # repository itself, not a module proxy that may resolve differently
+          # later.
+          rm -rf /opt/src
+          git clone --depth 1 --branch ${ReleaseTag} ${RepoUrl} /opt/src
+          cd /opt/src
+          sha=$(git rev-parse --short HEAD)
+          CGO_ENABLED=0 GOFLAGS=-mod=vendor GOPROXY=off GOCACHE=/tmp/gc HOME=/root \
+            go build -trimpath -ldflags "-s -w -X main.gitSHA=$sha" \
+            -o /opt/src/release/bin-native main.go
+
+          # install.sh expects the per-architecture layout the release archive
+          # uses, so the same script serves both a built-here and a downloaded
+          # build. One install path, not two that drift.
+          mkdir -p /opt/src/release/bin
+          cp /opt/src/release/bin-native \
+             /opt/src/release/bin/go-chunked-streaming-server-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
+          rm -f /opt/src/release/SHA256SUMS
+          cp -r /opt/src/deploy /opt/src/release/deploy
+          /opt/src/release/install.sh
+
+          curl -sf --max-time 5 http://127.0.0.1:9095/-/healthz || fail
+          /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} \
+            --resource OriginInstance --region ${AWS::Region}
 
   # ---------------- PLAYBACK CloudFront ----------------
   # Segments are immutable once written, so they cache for hours. The manifest

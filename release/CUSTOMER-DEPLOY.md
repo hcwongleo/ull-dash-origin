@@ -22,38 +22,31 @@ CHANGES-VS-UPSTREAM.txt                   our fixes, as commits
 SHA256SUMS
 ```
 
-## Deploy — three commands
+## Deploy
+
+See the [README](../README.md#deploy): download
+`pipelines/direct-ingest/origin-stack.yaml`, upload it in the CloudFormation
+console, enter your Elemental Live public IP, create. About 15 minutes.
+
+The template builds the server from a pinned git tag at first boot. Dependencies
+are vendored and the module proxy is disabled, so the only network dependency is
+this repository — a later change upstream cannot alter what you deployed.
+
+**Deploying by CLI instead:**
 
 ```bash
-# 1. Stage the archive in your own bucket
-aws s3 mb s3://my-origin-artifacts-$(aws sts get-caller-identity --query Account --output text)-ap-east-1
-aws s3 cp gcss-origin-<sha>.zip s3://my-origin-artifacts-.../
-
-# 2. Pin an AMI (deliberate, not automatic — see note below)
-aws ssm get-parameter --region ap-east-1 \
-  --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \
-  --query Parameter.Value --output text
-
-# 3. Deploy
 aws cloudformation deploy --region ap-east-1 \
   --stack-name ull-origin \
-  --template-file cloudformation/direct-ingest.yaml \
+  --template-file pipelines/direct-ingest/origin-stack.yaml \
   --capabilities CAPABILITY_IAM \
-  --parameter-overrides \
-    EncoderCidr=<elemental-public-ip>/32 \
-    ArtifactBucket=my-origin-artifacts-... \
-    ArtifactKey=gcss-origin-<sha>.zip \
-    AmiId=ami-xxxxxxxx
+  --parameter-overrides EncoderCidr=<elemental-public-ip>/32
 ```
 
-Then point Elemental Live at the stack's `IngestDestination` output.
-
-**Why the AMI is pinned rather than resolved automatically:** if it is an SSM
-parameter path, `UsePreviousValue` preserves the *path*, not the resolved value.
-A new Amazon Linux release then silently replaces your running origin during an
-unrelated stack update — and because UserData runs only at first boot, that also
-reverts the binary. This happened during development. Refresh the AMI as a
-deliberate act.
+**A note on stack updates.** The AMI is resolved from an SSM parameter path so
+that nothing has to be looked up by hand. The cost is that a later Amazon Linux
+release will replace the instance during an unrelated stack update. Rebuilding is
+harmless in itself, but the replacement clears RAM — see the warning below. Pass
+an explicit `AmiId=ami-xxxx` on updates to hold the instance still.
 
 ## Encoder settings
 
