@@ -76,7 +76,7 @@ Parameters:
 
   ReleaseTag:
     Type: String
-    Default: v0.2.0
+    Default: v0.2.1
     Description: Git tag to build. Keep identical to direct-ingest.
 
   CloudFrontPrefixListId:
