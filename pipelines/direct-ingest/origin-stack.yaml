@@ -115,7 +115,7 @@ Parameters:
 
   ReleaseTag:
     Type: String
-    Default: v0.1.0
+    Default: v0.1.1
     Description: >-
       Git tag to build. Pinned, so a redeploy always produces the same binary.
       The instance clones this tag and compiles it at first boot - dependencies
@@ -320,25 +320,18 @@ Resources:
 
           # A pinned tag, so this builds the same bytes every time. Dependencies
           # are vendored and GOPROXY is off: the only network dependency is the
-          # repository itself, not a module proxy that may resolve differently
+          # repository itself, not a module proxy that could resolve differently
           # later.
           rm -rf /opt/src
           git clone --depth 1 --branch ${ReleaseTag} ${RepoUrl} /opt/src
           cd /opt/src
-          sha=$(git rev-parse --short HEAD)
           CGO_ENABLED=0 GOFLAGS=-mod=vendor GOPROXY=off GOCACHE=/tmp/gc HOME=/root \
-            go build -trimpath -ldflags "-s -w -X main.gitSHA=$sha" \
-            -o /opt/src/release/bin-native main.go
+            go build -trimpath \
+            -ldflags "-s -w -X main.gitSHA=$(git rev-parse --short HEAD)" \
+            -o /opt/src/go-chunked-streaming-server main.go
 
-          # install.sh expects the per-architecture layout the release archive
-          # uses, so the same script serves both a built-here and a downloaded
-          # build. One install path, not two that drift.
-          mkdir -p /opt/src/release/bin
-          cp /opt/src/release/bin-native \
-             /opt/src/release/bin/go-chunked-streaming-server-$(uname -m | sed 's/aarch64/arm64/;s/x86_64/amd64/')
-          rm -f /opt/src/release/SHA256SUMS
-          cp -r /opt/src/deploy /opt/src/release/deploy
-          /opt/src/release/install.sh
+          # Same script an operator runs to upgrade, so there is one install path.
+          /opt/src/deploy/install.sh
 
           curl -sf --max-time 5 http://127.0.0.1:9095/-/healthz || fail
           /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} \

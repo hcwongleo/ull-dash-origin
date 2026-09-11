@@ -45,10 +45,10 @@ Then read the **Outputs** tab:
 
 **In Elemental Live, chunked transfer encoding must be ON.** Without it there is
 no low latency at all and nothing reports an error. Also set `UTCTiming` — see
-[Encoder settings](release/CUSTOMER-DEPLOY.md#encoder-settings).
+[Encoder settings](docs/operations.md#encoder-settings).
 
 Everything else has a working default. Full guide, including monitoring,
-upgrades and security: **[release/CUSTOMER-DEPLOY.md](release/CUSTOMER-DEPLOY.md)**
+upgrades and security: **[docs/operations.md](docs/operations.md)**
 
 ## Status — read this first
 
@@ -135,8 +135,6 @@ docker run --rm -v "$PWD":/src -w /src \
   golang:1.23 go build -trimpath \
   -ldflags "-s -w -X main.gitSHA=$(git rev-parse --short HEAD)" -o gcss-arm64 main.go
 ```
-
-Release archive for handover: `./release/build-release.sh`
 
 ## Test
 

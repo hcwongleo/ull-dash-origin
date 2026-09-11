@@ -1,48 +1,42 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  ch18 LINE B BASELINE + Lambda@Edge - the ORIGINAL POC origin, unmodified, with a
-  manifest-enriching Lambda@Edge added to the ingest distribution so it can be
-  compared against ch18b-gochunked-prod with the Lambda held constant.
-  BASELINE - EXPECT IT TO FAIL UNDER LOAD. See the header block.
-  ch18 LINE B - Open-source ULL-DASH origin POC. go-chunked-streaming-server on
-  a single EC2 (read-while-write chunked origin), fronted by CloudFront for both
-  ingest and playback. EC2 security group is locked to CloudFront's managed
-  prefix list (NOT 0.0.0.0). SSM for access (no SSH/22). Single instance, no HA.
+  ULL-DASH origin with CDN INGEST, for testing. Elemental Live -> CloudFront
+  (+ Lambda@Edge manifest enrichment) -> EC2 origin -> CloudFront -> players.
+  NOT the production path; use pipelines/direct-ingest for that.
 
 # ---------------------------------------------------------------------------
-# WHAT THIS TESTS (Line B): can an open-source read-while-write origin recover
-#   the ~4s ULL that S3 cannot? Elemental Live -> chunked PUT -> CloudFront ->
-#   EC2(go-chunked) -> CloudFront -> player.  Stream name: servertest1
+# WHAT THIS IS FOR
 #
-# OPEN UNKNOWNS (CFN builds the env; a live push is needed to confirm):
-#   1. Does Elemental Live's chunked PUT interoperate with go-chunked?
-#   2. Does the ingest CloudFront BUFFER the chunked body (which would blunt
-#      read-while-write)? If so, fall back to direct-to-EC2 with SG locked to
-#      the encoder IP.
+#   Two things direct-ingest cannot test:
 #
-# SECURITY: EC2:9094 inbound is restricted to the CloudFront origin-facing
-#   managed prefix list (pl-14b2577d in ap-east-1), so the origin is NOT open
-#   to 0.0.0.0. Access is via SSM Session Manager (no inbound 22).
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# THIS IS THE BASELINE, DELIBERATELY UNPATCHED. It clones upstream at deploy time,
-# so it carries the defects the production stack fixes. Expect, under real load:
+#   1. Whether the ingest CloudFront coalesces the encoder's chunked body. If it
+#      batches 0.2s fragments into larger writes, it costs latency the origin
+#      exists to recover. Deploy both, push one encoder at both, and compare how
+#      a single segment grows at each origin. Unresolved as of v0.1.1.
 #
-#   - ~1 CPU core consumed per viewer reading the live edge, so the origin
-#     saturates at roughly 16 concurrent reads on a 4 vCPU instance
-#   - NO retention at all (-d is not passed), so memory grows at the ingest rate
-#     and the process is killed in roughly 7 hours
-#   - 404 storms at the live edge (-w is not passed)
-#   - CachingDisabled on playback, so every viewer is a direct origin read
-#   - a crash-loop stops permanently after 5 attempts in 10 seconds
+#   2. The Lambda@Edge that injects ServiceDescription and UTCTiming into the
+#      manifest as the encoder PUTs it. Elemental Live emits neither.
 #
-# Run it alongside ch18b-gochunked-prod, push a second identical Elemental output
-# group at it, and compare. Do not leave it running unattended.
+#   The origin here is built from the SAME repository and tag as direct-ingest,
+#   so the ingest path is the only variable. It previously cloned upstream, which
+#   made the origin a variable too - and an unpatched one, burning a CPU core per
+#   live-edge viewer.
 #
-# The ONLY addition over the original file is the *.mpd cache behaviour on the
-# ingest distribution carrying the Lambda@Edge association, so the Lambda is held
-# constant between the two stacks and the origin is the only variable.
+# WHY NOT USE THIS IN PRODUCTION
+#
+#   An ingest CDN forces the security group to accept write methods from
+#   CloudFront's entire origin-facing prefix list, so ANY CloudFront distribution
+#   can PUT or DELETE segments in the stream. direct-ingest restricts writes to
+#   the encoder's address instead.
+#
+#   Playback here also uses CachingDisabled, so every viewer request reaches the
+#   origin. That is deliberate for measurement and wrong for scale.
+#
+# DEPLOY ORDER
+#
+#   The Lambda@Edge stack (manifest-lambda-stack.yaml) must exist first, in
+#   us-east-1, because Lambda@Edge only replicates from there. Pass its version
+#   ARN as ManifestLambdaVersionArn. Leave that empty to skip enrichment.
 # ---------------------------------------------------------------------------
 
 Parameters:
@@ -76,8 +70,14 @@ Parameters:
 
   RepoUrl:
     Type: String
-    Default: https://github.com/mjneil/go-chunked-streaming-server.git
-    Description: go-chunked-streaming-server repo (MIT).
+    Default: https://github.com/hcwongleo/ull-dash-origin.git
+    Description: Source repository. Must match direct-ingest, or the origin
+      becomes a variable in a test meant to isolate the ingest path.
+
+  ReleaseTag:
+    Type: String
+    Default: v0.1.1
+    Description: Git tag to build. Keep identical to direct-ingest.
 
   CloudFrontPrefixListId:
     Type: String
@@ -205,34 +205,21 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -xe
-          dnf install -y golang git make
-          cd /opt
-          git clone ${RepoUrl} gochunked
-          cd gochunked
-          export GO111MODULE=on
-          export HOME=/root
-          make
-          cat > /opt/gochunked/cors.json <<'CORS'
-          {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
-            "Access-Control-Expose-Headers": "*"
-          }
-          CORS
-          cat > /etc/systemd/system/gochunked.service <<UNIT
-          [Unit]
-          Description=go-chunked-streaming-server
-          After=network.target
-          [Service]
-          ExecStart=/opt/gochunked/bin/go-chunked-streaming-server -r -i ${OriginPort} -o /opt/gochunked/cors.json -p /opt/gochunked/content
-          WorkingDirectory=/opt/gochunked
-          Restart=always
-          User=root
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-          systemctl daemon-reload
-          systemctl enable --now gochunked
+          # Builds THIS repository at the pinned tag, identical to direct-ingest.
+          # It previously cloned upstream and ran make, which meant this stack
+          # deployed the unpatched server - one CPU core burned per live-edge
+          # viewer, forever. Fine when the point was an A/B against upstream;
+          # wrong now that the point is measuring the ingest CDN and the
+          # Lambda@Edge, where the origin must not be the variable.
+          dnf install -y golang git
+          rm -rf /opt/src
+          git clone --depth 1 --branch ${ReleaseTag} ${RepoUrl} /opt/src
+          cd /opt/src
+          CGO_ENABLED=0 GOFLAGS=-mod=vendor GOPROXY=off GOCACHE=/tmp/gc HOME=/root \
+            go build -trimpath \
+            -ldflags "-s -w -X main.gitSHA=$(git rev-parse --short HEAD)" \
+            -o /opt/src/go-chunked-streaming-server main.go
+          /opt/src/deploy/install.sh
 
   # ---------------- INGEST CloudFront (encoder chunked PUT) ----------------
   IngestDistribution:
