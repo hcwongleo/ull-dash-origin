@@ -3,5 +3,11 @@ bin/
 certs/
 .vscode/
 
-# Hand-assembled for offline dev builds; regenerate with `go mod vendor` before release.
-vendor/
+# vendor/ IS tracked on purpose: the boot-time build and the reproducible-build
+# verification both run with GOPROXY=off, so the modules must be in the tree.
+
+# Local build output
+gcss-amd64
+gcss-arm64
+release-*
+*.zip

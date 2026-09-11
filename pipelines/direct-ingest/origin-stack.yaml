@@ -1,0 +1,419 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ULL-DASH origin, DIRECT INGEST. Elemental Live pushes its chunked PUT straight
+  to the EC2 origin - no ingest CloudFront, no Lambda@Edge. Playback still goes
+  through CloudFront, which is where a CDN actually earns its keep.
+
+# ---------------------------------------------------------------------------
+# WHY DIRECT INGEST
+#
+#   A CDN in front of ingest buys nothing. CloudFront's value is fan-out to many
+#   readers; ingest has exactly one writer. What it costs is a hop, a TLS
+#   terminate/re-originate, and - if it coalesces the chunked body at all - part
+#   of the latency the origin exists to recover.
+#
+#   Removing it also removes the Lambda@Edge, and with it the manifest rewriting.
+#   That is a deliberate trade: see WHAT YOU GIVE UP.
+#
+# EXPECTED LATENCY GAIN - MEASURE, DO NOT ASSUME
+#
+#   Confident:    POP hop ~5-20ms, Lambda@Edge on every .mpd PUT ~5-30ms warm.
+#   Unconfirmed:  whether the ingest CloudFront coalesces 0.2s encoder fragments
+#                 into larger writes. If it does, this is worth up to ~0.5s; if
+#                 it does not, the total gain is tens of milliseconds against a
+#                 3-4s target, i.e. nothing a viewer perceives.
+#
+#   The measurement that settles it is in README.md. Run it before concluding
+#   this pipeline is better on latency; it is unambiguously better on simplicity.
+#
+# WHAT YOU GIVE UP
+#
+#   1. ServiceDescription / UTCTiming injection. Elemental Live emits neither by
+#      default. Configure UTCTiming on the encoder. Losing the injected
+#      Latency@target is arguably a gain: the injected 4000ms conflicted with the
+#      encoder's own suggestedPresentationDelay, which makes players hunt.
+#   2. CloudFront absorbing a flood on the ingest path. Mitigated far better by
+#      EncoderCidr below, which is a much tighter control than the prefix list.
+#
+# SECURITY - READ THIS
+#
+#   Ingest is PLAINTEXT HTTP. Anyone who can reach OriginPort from an allowed
+#   source address can PUT or DELETE segments. There is no authentication in
+#   go-chunked-streaming-server.
+#
+#   EncoderCidr is therefore mandatory and has no default. Set it to the
+#   encoder's public address, ideally /32.
+#
+#   TLS on the origin is NOT offered here, deliberately. The server supports
+#   -c/-k, but a custom CloudFront origin requires a publicly trusted
+#   certificate matching its domain name, which an EC2 public DNS name cannot
+#   have. Doing it properly needs a real domain plus ACM or Let's Encrypt on the
+#   instance - worth doing, but it is a separate change and pretending a
+#   self-signed cert would work here would be wrong.
+#
+#   If the encoder is on-premises, prefer Direct Connect or a VPN over pushing
+#   plaintext across the public internet.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  ChannelPrefix:
+    Type: String
+    Default: ch18d
+    AllowedPattern: '[a-z0-9-]+'
+    Description: Distinct from ch18a/ch18b so this can run alongside them.
+
+  StreamName:
+    Type: String
+    Default: ch18live
+
+  EncoderCidr:
+    Type: String
+    AllowedPattern: '^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)/(3[0-2]|[12]?\d)$'
+    ConstraintDescription: >-
+      Must be a single CIDR, e.g. 203.0.113.10/32. 0.0.0.0/0 is rejected below -
+      ingest has no authentication, so an open range means anyone can inject or
+      delete segments in your live stream.
+    Description: >-
+      Public address of the Elemental Live encoder. Use /32. This is the ONLY
+      control protecting ingest.
+
+  InstanceType:
+    Type: String
+    Default: c8g.2xlarge
+    Description: >-
+      Graviton4. Sized for headroom, not for measured need: the patched origin
+      used 0.0036 cores and 25MB RSS serving a live 4Mbps stream, so CPU is not
+      the constraint. What matters is network egress on playback cache misses.
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      PINNED ON PURPOSE. Do not switch this back to an
+      AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>. UsePreviousValue preserves
+      the PATH, not the resolved value, so a new Amazon Linux release silently
+      replaced a running origin during an unrelated stack update - which also
+      reverted the binary, because UserData only runs at first boot. Refresh it
+      as a deliberate act:
+        aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 --query Parameter.Value --output text
+
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket in YOUR account holding the release archive.
+
+  ArtifactKey:
+    Type: String
+    Description: >-
+      Release archive key, e.g. gcss-origin-159f298.zip, as produced by
+      release/build-release.sh. Contains both architectures, install.sh and the
+      systemd unit.
+
+      Changing this does NOT update a running instance - UserData runs only at
+      first boot. Run install.sh over SSM as well, or the change takes effect
+      only on the next replacement.
+
+  OriginPort:
+    Type: Number
+    Default: 9094
+
+  CloudFrontOriginPrefixList:
+    Type: String
+    Default: pl-14b2577d
+    Description: >-
+      CloudFront origin-facing managed prefix list, used for the PLAYBACK path
+      only (ap-east-1 = pl-14b2577d). Look up per region with:
+      aws ec2 describe-managed-prefix-lists --filters
+      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+
+  # Long TTL is only safe because the encoder's segment names carry a per-run
+  # token, so a name is never reused for different bytes. Verify that before
+  # raising it: if names are ever recycled, viewers are served stale video, which
+  # is a far worse failure than a cache miss.
+  SegmentCacheSeconds:
+    Type: Number
+    Default: 21600
+
+Rules:
+  RejectOpenEncoderCidr:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref EncoderCidr, '0.0.0.0/0']]
+        AssertDescription: >-
+          EncoderCidr must not be 0.0.0.0/0. Ingest is unauthenticated, so an
+          open range lets anyone PUT or DELETE segments in your live stream.
+
+Mappings:
+  ManagedPolicies:
+    Cache:
+      Disabled: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+    OriginRequest:
+      AllViewerExceptHost: b689b0a8-53d0-40ab-baf2-68738e2966ac
+    ResponseHeaders:
+      CorsPreflight: 5cc3b908-e619-4b99-88e5-2cf7f45965bd
+
+Resources:
+
+  # ---------------- Network ----------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.30.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-vpc' }]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-igw' }]
+
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.30.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-public' }]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  SubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  # Two ingress rules with different sources on the same port:
+  #   - the encoder, for PUT/DELETE (ingest)
+  #   - CloudFront's origin-facing prefix list, for GET (playback)
+  #
+  # This is the one real security gain of direct ingest. With an ingest CDN in
+  # front, the prefix list has to allow write methods, so ANY CloudFront
+  # distribution in the world can PUT to your origin. Here only the encoder can.
+  OriginSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ULL-DASH origin - ingest from the encoder only, playback from CloudFront only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-sg' }]
+
+  IngestFromEncoder:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref OriginSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref OriginPort
+      ToPort: !Ref OriginPort
+      CidrIp: !Ref EncoderCidr
+      Description: Elemental Live chunked PUT - the only write path
+
+  PlaybackFromCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref OriginSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref OriginPort
+      ToPort: !Ref OriginPort
+      SourcePrefixListId: !Ref CloudFrontOriginPrefixList
+      Description: Playback CloudFront origin fetches
+
+  # ---------------- Stable address for the encoder ----------------
+  # An EIP, because the encoder's destination should not change when the instance
+  # is stopped and started. A public DNS name does change, and re-pointing a live
+  # encoder is not something you want on the critical path of a recovery.
+  OriginEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-eip' }]
+
+  OriginEipAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt OriginEip.AllocationId
+      InstanceId: !Ref OriginInstance
+
+  # ---------------- IAM ----------------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-own-artifact
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucket}/*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---------------- Origin ----------------
+  # Installs a prebuilt, tested binary rather than cloning and compiling at boot.
+  # A build at first boot means the code a replacement instance runs depends on
+  # whatever upstream HEAD happens to be that day.
+  OriginInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref OriginSecurityGroup]
+      Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin' }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+          # The install logic lives in the release archive, not here. UserData runs
+          # only at first boot, so keeping it here would mean provisioning a new
+          # instance and upgrading a running one are two code paths that drift.
+          dnf install -y unzip
+          aws s3 cp "s3://${ArtifactBucket}/${ArtifactKey}" /tmp/release.zip --region ${AWS::Region}
+          rm -rf /tmp/release && mkdir -p /tmp/release
+          unzip -q /tmp/release.zip -d /tmp/release
+          "$(find /tmp/release -name install.sh -maxdepth 2 | head -1)"
+
+  # ---------------- PLAYBACK CloudFront ----------------
+  # Segments are immutable once written, so they cache for hours. The manifest
+  # must not: it is rewritten every second, and serving a stale one moves the
+  # player's idea of the live edge.
+  SegmentCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${ChannelPrefix}-segments'
+        Comment: Immutable media segments - long TTL, safe only while names carry a per-run token
+        DefaultTTL: !Ref SegmentCacheSeconds
+        MaxTTL: !Ref SegmentCacheSeconds
+        MinTTL: !Ref SegmentCacheSeconds
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: none }
+
+  ManifestCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${ChannelPrefix}-manifest'
+        Comment: Live manifest - must stay at or below the encoder's minimumUpdatePeriod
+        DefaultTTL: 1
+        MaxTTL: 1
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: { CookieBehavior: none }
+          HeadersConfig: { HeaderBehavior: none }
+          QueryStringsConfig: { QueryStringBehavior: none }
+
+  PlaybackDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${ChannelPrefix} ULL-DASH - PLAYBACK only (ingest goes direct to EC2)'
+        HttpVersion: http2and3
+        Origins:
+          - Id: ec2-origin
+            DomainName: !Sub
+              - 'ec2-${DashedIp}.${Region}.compute.amazonaws.com'
+              - DashedIp: !Join ['-', !Split ['.', !Ref OriginEip]]
+                Region: !Ref AWS::Region
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: !Ref OriginPort
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        # GET/HEAD/OPTIONS only. Playback has no business writing, and this is
+        # what keeps the write path exclusive to the encoder's address.
+        DefaultCacheBehavior:
+          TargetOriginId: ec2-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD, OPTIONS]
+          Compress: false
+          CachePolicyId: !Ref SegmentCachePolicy
+          OriginRequestPolicyId: !FindInMap [ManagedPolicies, OriginRequest, AllViewerExceptHost]
+          ResponseHeadersPolicyId: !FindInMap [ManagedPolicies, ResponseHeaders, CorsPreflight]
+        CacheBehaviors:
+          # Matches nested paths too, verified: *.mpd hits /a/b/c.mpd.
+          - PathPattern: '*.mpd'
+            TargetOriginId: ec2-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            CachedMethods: [GET, HEAD, OPTIONS]
+            Compress: true
+            CachePolicyId: !Ref ManifestCachePolicy
+            OriginRequestPolicyId: !FindInMap [ManagedPolicies, OriginRequest, AllViewerExceptHost]
+            ResponseHeadersPolicyId: !FindInMap [ManagedPolicies, ResponseHeaders, CorsPreflight]
+        CustomErrorResponses:
+          # Never cache a negative at the live edge: the segment a player asked
+          # for a moment early exists a moment later.
+          - ErrorCode: 403
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 500
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 502
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 503
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 504
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  InstanceId:
+    Value: !Ref OriginInstance
+
+  SSMConnect:
+    Value: !Sub 'aws ssm start-session --target ${OriginInstance} --region ${AWS::Region}'
+
+  IngestDestination:
+    Description: >-
+      Elemental Live DASH output destination. Chunked transfer encoding MUST be
+      on. Plaintext HTTP - reachable only from EncoderCidr.
+    Value: !Sub 'http://${OriginEip}:${OriginPort}/${StreamName}'
+
+  PlayerUrl:
+    Value: !Sub 'https://${PlaybackDistribution.DomainName}/${StreamName}.mpd'
+
+  OriginEipAddress:
+    Description: Stable ingest address. Survives stop/start; re-pointing the encoder should never be on a recovery path.
+    Value: !Ref OriginEip
+
+  AdminCheck:
+    Description: Health and metrics, localhost only, over SSM
+    Value: 'curl -s http://127.0.0.1:9095/-/healthz'
