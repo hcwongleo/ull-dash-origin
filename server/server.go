@@ -13,9 +13,40 @@ var (
 	cleanUpChannel = make(chan bool)
 )
 
+// Options configures the server. A struct rather than a positional argument
+// list so that adding an option cannot silently reorder existing ones.
+type Options struct {
+	BasePath                     string
+	IngestIdleTimeout            time.Duration
+	AdminAddr                    string
+	LogLevel                     string
+	GitSHA                       string
+	Port                         int
+	CertFilePath                 string
+	KeyFilePath                  string
+	CorsConfigFilePath           string
+	OnlyRAM                      bool
+	WaitForDataToArrive          bool
+	DoCleanupBasedOnCacheHeaders bool
+}
+
 // StartHTTPServer Starts the webserver
-func StartHTTPServer(basePath string, port int, certFilePath string, keyFilePath string, corsConfigFilePath string, onlyRAM bool, doCleanupBasedOnCacheHeaders bool, waitForDataToArrive bool) error {
+func StartHTTPServer(o Options) error {
 	var err error
+
+	basePath := o.BasePath
+	port := o.Port
+	certFilePath := o.CertFilePath
+	keyFilePath := o.KeyFilePath
+	corsConfigFilePath := o.CorsConfigFilePath
+	onlyRAM := o.OnlyRAM
+	waitForDataToArrive := o.WaitForDataToArrive
+	doCleanupBasedOnCacheHeaders := o.DoCleanupBasedOnCacheHeaders
+
+	SetLogLevel(o.LogLevel)
+	SetIngestIdleTimeout(o.IngestIdleTimeout)
+	log.Printf("ingest idle timeout: %s", o.IngestIdleTimeout)
+	StartAdminListener(o.AdminAddr, o.GitSHA)
 
 	cors := NewCors()
 	if corsConfigFilePath != "" {
@@ -39,7 +70,7 @@ func StartHTTPServer(basePath string, port int, certFilePath string, keyFilePath
 
 	r.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer w.(http.Flusher).Flush()
-		log.Printf("%s %s", r.Method, r.URL.String())
+		logDebugf("%s %s", r.Method, r.URL.String())
 		switch r.Method {
 		case http.MethodGet:
 			GetHandler(waitingRequests, cors, basePath, w, r)
@@ -62,14 +93,24 @@ func StartHTTPServer(basePath string, port int, certFilePath string, keyFilePath
 		startCleanUp(basePath, 1000)
 	}
 
+	// An explicit server, not ListenAndServe. ReadTimeout stays zero on purpose:
+	// it would bound the whole request and so kill a legitimate long chunked PUT.
+	// Silence is bounded per-read instead, in withIdleDeadline.
+	srv := &http.Server{
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           r,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	if (certFilePath != "") && (keyFilePath != "") {
 		// Try HTTPS
 		log.Printf("HTTPS server running on port %d", port)
-		err = http.ListenAndServeTLS(":"+strconv.Itoa(port), certFilePath, keyFilePath, r)
+		err = srv.ListenAndServeTLS(certFilePath, keyFilePath)
 	} else {
 		// Try HTTP
 		log.Printf("HTTP server running on port %d", port)
-		err = http.ListenAndServe(":"+strconv.Itoa(port), r)
+		err = srv.ListenAndServe()
 	}
 
 	if doCleanupBasedOnCacheHeaders {

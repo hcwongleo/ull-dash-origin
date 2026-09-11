@@ -100,15 +100,42 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 	Files[name] = f
 	FilesLock.Unlock()
 
-	// Start writing to file without holding lock so that GET requests can read from it
-	io.Copy(f, r.Body)
-	r.Body.Close()
+	// Start writing to file without holding lock so that GET requests can read from it.
+	// The body carries an idle deadline so a half-open connection cannot pin this
+	// goroutine and its socket forever.
+	body := withIdleDeadline(w, r)
+	_, copyErr := io.Copy(f, body)
+	body.Close()
+	// Close before anything else, so readers parked on this file are released
+	// whether the ingest succeeded or not.
 	f.Close()
 
+	// An aborted ingest leaves a truncated segment. Serving it as if complete
+	// hands players corrupt media, so drop it: the encoder will either retry the
+	// PUT or move on, and a 404 is recoverable where bad bytes are not.
+	if copyErr != nil {
+		FilesLock.Lock()
+		if cur, ok := Files[name]; ok && cur == f {
+			delete(Files, name)
+		}
+		FilesLock.Unlock()
+
+		PutAbortedTotal.Add(1)
+		logWarnf("ingest of %s aborted after %d bytes, discarded: %v", name, f.Len(), copyErr)
+
+		addCors(w, cors)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	if !onlyRAM {
-		err := f.WriteToDisk(basePath)
-		if err != nil {
-			log.Fatalf("Error saving to disk: %v", err)
+		if err := f.WriteToDisk(basePath); err != nil {
+			// Never log.Fatalf here: one failed write would take the whole origin
+			// down, and with it every in-flight stream.
+			logErrorf("saving %s to disk: %v", name, err)
+			addCors(w, cors)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 	}
 	addCors(w, cors)
