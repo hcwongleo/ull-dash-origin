@@ -436,7 +436,10 @@ are ever recycled, viewers are served stale video — worse than a cache miss.
 
 ## 8. Configuration
 
-Eleven flags. **None depends on the encoder's DASH configuration**, and that is the
+Thirteen flags exist; the unit file passes eleven. `-c`/`-k` (origin TLS) and `-d`
+(upstream's deprecated cleanup toggle) are defined and unused.
+
+**None of the eleven depends on the encoder's DASH configuration**, and that is the
 design rule, not a coincidence: a flag derived from `availabilityTimeOffset` or
 `timeShiftBufferDepth` becomes silently wrong the first time the encoder is
 reconfigured. An earlier build had six such couplings and two were wrong in

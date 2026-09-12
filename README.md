@@ -64,8 +64,8 @@ authentication, and ingest is plaintext HTTP. See
 
 ## Configuration
 
-Eleven flags, in `deploy/gochunked.service`. **None depends on your DASH
-configuration** — that is deliberate. A flag derived from `availabilityTimeOffset` or
+Eleven flags, in `deploy/gochunked.service` (the binary defines two more for origin
+TLS, which is not used). **None depends on your DASH configuration** — that is deliberate. A flag derived from `availabilityTimeOffset` or
 `timeShiftBufferDepth` becomes silently wrong the first time the encoder is
 reconfigured; an earlier build had six such couplings and two were wrong in production.
 
