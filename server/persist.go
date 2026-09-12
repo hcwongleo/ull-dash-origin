@@ -46,16 +46,33 @@ import (
 // the resolved path is checked to be inside the directory regardless.
 
 const (
-	// An initialisation segment is a moov box: hundreds of bytes to a few KB.
-	// Anything larger is not one, and is not written.
-	maxPersistBytes = 1 << 20
+	// An initialisation segment is a moov box - measured at ~900 bytes on this
+	// stream. 16 MB is far above anything real, and deliberately so: this cap exists
+	// only to refuse something that is obviously not an initialisation segment, not
+	// to police size. A large ladder, a codec with a fat decoder config, or an
+	// encoder that pads the box should never be rejected by a number I guessed.
+	maxPersistBytes = 16 << 20
 
 	// A ceiling on files, so an unauthenticated writer cannot fill the disk one
-	// init-shaped name at a time. When full, the OLDEST is evicted rather than the
-	// new write refused: with several channels on one origin, each run leaves ~3
-	// files behind, and refusing the newest would deny protection to the channel
-	// currently on air while keeping stale files from runs that ended weeks ago.
-	maxPersistFiles = 256
+	// init-shaped name at a time. When full the OLDEST is evicted, never the new
+	// write refused: with several channels on one origin each run leaves ~3 files, so
+	// refusing the newest would deny protection to the channel currently on air while
+	// keeping stale files from runs that ended weeks ago.
+	//
+	// 4096 is generous on purpose. A live channel needs 3 files; everything else on
+	// disk is from finished runs and is worthless. Since eviction is oldest-first the
+	// number only has to comfortably exceed 3 x channels, and being stingy would risk
+	// evicting something still in use for no gain - the realistic footprint is a few
+	// megabytes on a 30 GB volume.
+	maxPersistFiles = 4096
+
+	// The cap that actually protects the disk. The per-file and per-count limits are
+	// deliberately generous so they never reject or evict something real, but
+	// generosity multiplies: 4096 files at 16 MB each would be 68 GB on a 30 GB
+	// volume. Bounding the AGGREGATE is what makes the other two safe to be loose.
+	//
+	// 512 MB is ~1.7% of the volume and ~138x the realistic footprint of 3.7 MB.
+	maxPersistTotalBytes = 512 << 20
 
 	persistSubdir = "init"
 )
@@ -187,7 +204,7 @@ func PersistInit(name string, headers http.Header, body []byte) {
 	// Only touch the ceiling when adding something new, so re-PUTs of the same init
 	// segment always pass straight through.
 	if _, err := os.Stat(full); os.IsNotExist(err) {
-		evictOldest(dir, maxPersistFiles-1)
+		evictOldest(dir, maxPersistFiles-1, maxPersistTotalBytes-int64(len(body)))
 	}
 
 	var buf bytes.Buffer
@@ -214,39 +231,52 @@ func PersistInit(name string, headers http.Header, body []byte) {
 	logInfof("persisted initialisation segment %s (%d bytes)", name, len(body))
 }
 
-// evictOldest removes the oldest files until at most keep remain, so a new write
-// always has room. Oldest-first by modification time: a file from a finished
-// encoder run is worthless, while the one being written now is what a new viewer
-// needs after a restart.
-func evictOldest(dir string, keep int) {
+// evictOldest removes the oldest files until both budgets are satisfied, so a new
+// write always has room.
+//
+// Cost is O(files) per NEW file, because it reads the directory. That is acceptable
+// only because new initialisation segments are rare - three per encoder run, not per
+// segment - so this runs a handful of times a day, not 1.5 times a second. A re-PUT
+// of an existing init segment skips it entirely.
+//
+// Oldest-first by modification time, because a file from a finished encoder run is
+// worthless while the one being written now is exactly what a new viewer needs after
+// a restart. Both budgets matter: the file count stops an unbounded number of tiny
+// files, and the byte budget stops a small number of large ones.
+func evictOldest(dir string, keepFiles int, keepBytes int64) {
 	entries, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return
 	}
 
 	files := make([]os.FileInfo, 0, len(entries))
+	var total int64
 	for _, e := range entries {
 		if !e.IsDir() {
 			files = append(files, e)
+			total += e.Size()
 		}
-	}
-	if len(files) <= keep {
-		return
 	}
 
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].ModTime().Before(files[j].ModTime())
 	})
 
-	for _, e := range files[:len(files)-keep] {
+	for _, e := range files {
+		if len(files) <= keepFiles && total <= keepBytes {
+			return
+		}
 		full, ok := safePath(dir, e.Name())
 		if !ok {
 			continue
 		}
-		if err := os.Remove(full); err == nil {
-			logWarnf("evicted persisted %s to stay under the %d-file ceiling; it is from an older encoder run",
-				e.Name(), maxPersistFiles)
+		if err := os.Remove(full); err != nil {
+			continue
 		}
+		total -= e.Size()
+		files = files[1:]
+		logWarnf("evicted persisted %s (%d bytes) to stay within %d files / %d MB; it is from an older encoder run",
+			e.Name(), e.Size(), maxPersistFiles, maxPersistTotalBytes>>20)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func withPersist(t *testing.T) string {
@@ -149,35 +150,117 @@ func TestPersistRefusesOversizedBodies(t *testing.T) {
 	}
 }
 
-// An unauthenticated writer must not be able to fill the disk one init-shaped name
-// at a time - AND the newest write must always succeed, because with several
-// channels on one origin the newest is the channel currently on air.
-func TestPersistCeilingEvictsOldestNotNewest(t *testing.T) {
+// The newest write must always succeed and the oldest must be the one to go: with
+// several channels on one origin, the newest is the channel currently on air while
+// the oldest is from a run that already ended.
+//
+// Exercises evictOldest directly with small budgets rather than writing thousands of
+// files, because the real ceiling is 4096 and doing that took 40 seconds for no extra
+// confidence.
+func TestEvictionTakesTheOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+
+	for i := 0; i < 6; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("f%d", i))
+		if err := ioutil.WriteFile(name, []byte("xxxx"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Distinct modification times, oldest first.
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		if err := os.Chtimes(name, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	evictOldest(dir, 3, 1<<30) // keep 3 files, bytes not binding
+
+	entries, err := ioutil.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("left %d files, want 3", len(entries))
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Name()] = true
+	}
+	for _, kept := range []string{"f3", "f4", "f5"} {
+		if !got[kept] {
+			t.Errorf("%s was evicted; it is newer than the ones kept", kept)
+		}
+	}
+	for _, gone := range []string{"f0", "f1", "f2"} {
+		if got[gone] {
+			t.Errorf("%s survived; eviction is not oldest-first", gone)
+		}
+	}
+}
+
+// And the byte budget evicts too, not just the count.
+func TestEvictionHonoursTheByteBudget(t *testing.T) {
+	dir := t.TempDir()
+
+	for i := 0; i < 5; i++ {
+		name := filepath.Join(dir, fmt.Sprintf("b%d", i))
+		if err := ioutil.WriteFile(name, make([]byte, 1000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mt := time.Now().Add(time.Duration(i-10) * time.Minute)
+		if err := os.Chtimes(name, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	evictOldest(dir, 1000, 2500) // count not binding; 2500 bytes allows 2 files
+
+	entries, _ := ioutil.ReadDir(dir)
+	var total int64
+	for _, e := range entries {
+		total += e.Size()
+	}
+	if total > 2500 {
+		t.Errorf("left %d bytes, budget was 2500", total)
+	}
+	if len(entries) == 0 {
+		t.Error("evicted everything; it should stop as soon as the budget is met")
+	}
+}
+
+// The per-file and per-count caps are deliberately loose, so the aggregate cap is
+// what actually protects the disk. 4096 files at the 16 MB per-file cap would be
+// 68 GB on a 30 GB volume.
+func TestPersistBoundsTotalBytesNotJustFileCount(t *testing.T) {
 	resetFiles(t)
 	dir := withPersist(t)
 
-	for i := 0; i < maxPersistFiles+40; i++ {
-		PersistInit(fmt.Sprintf("/ch%d-v_init.mp4", i), http.Header{}, []byte("moov"))
+	// Well under the file ceiling, but each file is large.
+	big := make([]byte, 8<<20) // 8 MB
+	for i := 0; i < 90; i++ {  // 720 MB if nothing were evicted
+		PersistInit(fmt.Sprintf("/big%d-v_init.mp4", i), http.Header{}, big)
 	}
 
 	entries, err := ioutil.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var total int64
+	for _, e := range entries {
+		total += e.Size()
+	}
+	if total > maxPersistTotalBytes {
+		t.Errorf("holding %d MB, aggregate cap is %d MB - the disk is not bounded",
+			total>>20, maxPersistTotalBytes>>20)
+	}
 	if len(entries) > maxPersistFiles {
 		t.Errorf("holding %d files, ceiling is %d", len(entries), maxPersistFiles)
 	}
 
-	// The last write must be present: refusing it would deny protection to the
-	// channel currently on air while keeping files from runs that already ended.
-	last := fmt.Sprintf("/ch%d-v_init.mp4", maxPersistFiles+40-1)
+	// The newest must still be there: evicting what is currently on air to satisfy a
+	// budget would defeat the point.
+	last := fmt.Sprintf("/big%d-v_init.mp4", 89)
 	if _, err := os.Stat(filepath.Join(dir, encodeName(last))); err != nil {
-		t.Errorf("the newest write was refused: %v", err)
-	}
-
-	// And an early one must be gone.
-	if _, err := os.Stat(filepath.Join(dir, encodeName("/ch0-v_init.mp4"))); err == nil {
-		t.Error("the oldest file was kept; eviction is not oldest-first")
+		t.Errorf("the newest write was evicted or refused: %v", err)
 	}
 }
 

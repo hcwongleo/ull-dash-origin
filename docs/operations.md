@@ -137,6 +137,10 @@ has silently broken every time it has been tried here.
 **Memory scales with channels × renditions × window**, and a restart affects every
 channel at once.
 
+Initialisation segments on disk are bounded generously — 4096 files or 512 MB in
+total, whichever comes first, evicting the oldest. A live channel needs 3 files, so
+that is ~1300 channels' worth and the realistic footprint is a few megabytes.
+
 **So one origin per channel is usually the better trade.** It gives independent
 restarts, independent alarms and independent sizing, and the origin is a small
 fraction of the CDN bill — sharing one to save a few hundred dollars a month couples
