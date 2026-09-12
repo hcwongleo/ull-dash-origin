@@ -68,7 +68,7 @@ Metadata:
       - Label: { default: 'Monitoring' }
         Parameters: [AlarmEmail, HeapAlarmBytes, IngestStaleAlarmSeconds, MetricNamespace]
       - Label: { default: 'Advanced' }
-        Parameters: [RepoUrl, AmiId, OriginPort, CloudFrontOriginPrefixList, SegmentCacheSeconds]
+        Parameters: [RepoUrl, AmiId, OriginPort, RootVolumeSizeGb, CloudFrontOriginPrefixList, SegmentCacheSeconds]
     ParameterLabels:
       EncoderCidr: { default: 'Elemental Live public IP (as a /32)' }
       AlarmEmail: { default: 'Email for alarms (optional)' }
@@ -100,11 +100,17 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: c8g.2xlarge
+    Default: c8g.4xlarge
     Description: >-
-      Graviton4. Sized for headroom, not for measured need: the patched origin
-      used 0.0036 cores and 25MB RSS serving a live 4Mbps stream, so CPU is not
-      the constraint. What matters is network egress on playback cache misses.
+      Graviton4, 16 vCPU / 32 GB. Sized for CONCURRENCY, not memory: memory is
+      capped at 25% by the unit file and steady state is ~25MB.
+
+      The load that scales with audience is held requests. -w holds a GET for a
+      not-yet-arrived segment for up to 2.5s, and live requests are synchronised
+      because every viewer wants the same segment at the same instant. At 100k
+      viewers with ~10% early at any moment that is roughly 15,000 concurrent held
+      requests, about 3.5 cores by measurement (2000 readers = 0.39 cores). 16 vCPU
+      is ~4x that. Note the 100k figure is extrapolated, not tested.
 
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -162,6 +168,28 @@ Parameters:
     Description: >-
       Alarm when no bytes have been ingested for this long. This is the only signal
       that the stream is off the air; nothing else reports it.
+
+  RootVolumeSizeGb:
+    Type: Number
+    Default: 30
+    MinValue: 8
+    Description: >-
+      Root volume size. Measured usage is 2.4 GB, and the worst case is about 3.2 GB
+      once journald reaches its cap of 10% of the filesystem. Nothing else is
+      written to disk - content is held in RAM.
+
+      Note this is gp3, where IOPS and throughput are DECOUPLED from size: 8 GB and
+      100 GB both give 3000 IOPS and 125 MB/s. Enlarging the volume buys capacity
+      only, not speed. 20 GB is comfortable headroom for patching and dnf cache.
+
+  CpuAlarmPercent:
+    Type: Number
+    Default: 50
+    Description: >-
+      Alarm above this CPU for 15 minutes. Measured steady state is 0.0036 cores -
+      about 0.05% of 8 vCPU - so 50% is ~1000x normal. It exists as a backstop for
+      any runaway, including the read-path spin that cost one core per viewer
+      before it was fixed: six stuck readers on 8 vCPU would sit around 75%.
 
   EnableCloudFrontAdditionalMetrics:
     Type: String
@@ -364,6 +392,15 @@ Resources:
       IamInstanceProfile: !Ref InstanceProfile
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds: [!Ref OriginSecurityGroup]
+      # Declared explicitly rather than inherited from the AMI, so a future Amazon
+      # Linux release cannot silently change the size or type underneath you.
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSizeGb
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
       Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin' }]
       # CreationPolicy so the stack does not report CREATE_COMPLETE while the
       # compile is still running. Without it an operator sees success and points
@@ -482,8 +519,14 @@ Resources:
           # for a moment early exists a moment later.
           - ErrorCode: 403
             ErrorCachingMinTTL: 0
+          # 404 is the one negative worth caching, briefly. ULL players request
+          # segments before they exist because the manifest invites it, and those
+          # requests are synchronised across the whole audience - so an uncached 404
+          # is one origin hit per viewer, in a burst every segment boundary. One
+          # second collapses that to one per POP while costing at most 1s of
+          # staleness on a segment that has just become available.
           - ErrorCode: 404
-            ErrorCachingMinTTL: 0
+            ErrorCachingMinTTL: 1
           - ErrorCode: 500
             ErrorCachingMinTTL: 0
           - ErrorCode: 502
@@ -575,7 +618,15 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub '${ChannelPrefix}-origin-goroutines'
-      AlarmDescription: Goroutines climbing. Readers or ingests are not being released.
+      AlarmDescription: >-
+        Goroutines are not returning to baseline. Go runs one per in-flight request,
+        so this count IS the number of requests currently in progress - measured on
+        this origin: 5 idle, 25 with 20 readers, 85 with 80 readers, back to 5 when
+        they finish. A count that ratchets up and never comes down means requests
+        are stuck, which is the shape every leak in this server has had: readers
+        spinning after a viewer disconnected, ingests blocked on a socket that went
+        quiet, readers parked on a file that was reclaimed. Check /-/metrics
+        readers_active and /debug/pprof/goroutine over SSM.
       Namespace: !Ref MetricNamespace
       MetricName: Goroutines
       Dimensions:
@@ -584,10 +635,80 @@ Resources:
       Statistic: Average
       Period: 300
       EvaluationPeriods: 3
-      Threshold: 2000
+      # High because -w is enabled: a held request legitimately occupies a goroutine
+      # for up to 2.5s, so at scale tens of thousands are normal rather than a leak.
+      # This is watching for a ratchet that never comes down, not for load.
+      Threshold: 30000
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
+
+  # A backstop for any runaway, not a load policeman. The specific failure it would
+  # have caught is the read-path spin: one CPU core burned per live-edge viewer,
+  # forever, because a disconnected reader never noticed and never exited.
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ChannelPrefix}-origin-cpu'
+      AlarmDescription: >-
+        Sustained CPU far above the measured steady state of 0.0036 cores. Serving
+        this stream costs almost nothing, so this means something is spinning rather
+        than working. Check gcss_readers_active and go_goroutines first, then
+        /debug/pprof/profile over SSM.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OriginInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref CpuAlarmPercent
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # The alarm that tells you to go and restart the encoder output.
+  #
+  # EC2 automatic recovery is already enabled by default and will migrate the
+  # instance without being asked - but it does not NOTIFY, and recovery empties RAM.
+  # Elemental Live only sends initialisation segments when an output group starts,
+  # so after a host event new viewers get 404 on init until the encoder output is
+  # restarted. Existing viewers keep playing, which is what makes it easy to miss.
+  HostEventAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ChannelPrefix}-origin-host-check-failed'
+      AlarmDescription: >-
+        The instance or its host failed a status check. AWS automatic recovery may
+        migrate it without asking, and that empties RAM - which loses the
+        initialisation segments. ACTION: once it is back, confirm the init segments
+        are being served, and if not restart the Elemental Live output group.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OriginInstance
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  # NOTE: there is deliberately NO CloudFront alarm anywhere in this solution.
+  # CloudWatch alarms are regional and CloudFront publishes only to us-east-1 -
+  # verified: AWS/CloudFront has 0 metrics in this region and 100 in us-east-1. An
+  # alarm here would sit in OK forever and never fire, and putting one in us-east-1
+  # means a second stack plus a second SNS topic and email confirmation for a single
+  # rate-based metric that is silent until you have an audience.
+  #
+  # The origin-side alarms cover the same ground without that blind spot: if the
+  # origin stops answering, ingest-stale fires because the publisher deliberately
+  # sends nothing and missing data is treated as breaching. CloudFront errors remain
+  # visible on the dashboard, which CAN graph across regions - only alarms cannot.
 
   # One URL that answers "is the stream up, is memory fine, is anything alarming",
   # so an operator does not need an SSM session to find out. The first three
@@ -607,7 +728,7 @@ Resources:
                 "alarms": [ "${IngestStaleAlarm.Arn}", "${HeapAlarm.Arn}", "${GoroutineAlarm.Arn}" ] } },
 
             { "type": "text", "x": 0, "y": 4, "width": 24, "height": 1,
-              "properties": { "markdown": "### Origin \u2014 from inside the instance, published every 5 min by a systemd timer" } },
+              "properties": { "markdown": "### Origin \\u2014 from inside the instance, published every 5 min by a systemd timer\\n\\n**Goroutines = requests currently in progress.** Go uses one per request, so the count rises with viewers and **must fall back to ~5 when they leave**. Measured on this origin: 5 idle, 25 with 20 readers, 85 with 80 readers, then 5 again. A count that climbs and never comes down means requests are stuck \\u2014 that is how every leak in this server has looked: readers spinning after a viewer disconnected, ingests blocked on a socket that went quiet, readers waiting on a file that was reclaimed.\\n\\n**Heap** should be flat. **Ingest age** should sit at 0\\u20132 s. **Swept** and **aborted** should both stay flat." } },
 
             { "type": "metric", "x": 0, "y": 5, "width": 8, "height": 6,
               "properties": {

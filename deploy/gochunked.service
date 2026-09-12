@@ -27,9 +27,23 @@ Group=gochunked
 # stops, and not at all if it is reconfigured or replaced. 3600s is ~300x a typical
 # 12s timeShiftBufferDepth, so it cannot reach live content.
 #
-#   no -w : holding a GET for a not-yet-present segment buys ~0.2s of latency and
-#           costs visible jitter, because the hold must be sized against
-#           availabilityTimeOffset to avoid 404ing requests the manifest invites.
+# -w holds a GET for a segment that has not arrived yet, instead of returning 404.
+#
+# It was previously OFF because it had been sized WRONG, not because it is wrong:
+# -wait-timeout-ms was 1000 while the manifest advertises
+# availabilityTimeOffset="1.800", so a player accepting that invitation was stalled
+# for 1.2s and then refused. Every retry moved its position, which is where the
+# fluctuating live latency came from.
+#
+# 2500ms EXCEEDS the 1800ms the manifest invites, which is the whole point. The
+# alternative is worse at scale: 404s are not cached at the edge
+# (ErrorCachingMinTTL is 1s on 404 and 0 elsewhere), live requests are synchronised
+# because every viewer wants the same segment at the same instant, and so every
+# early request becomes an origin hit in a burst every segment boundary.
+#
+# The cost is that a held request occupies a goroutine and a connection for up to
+# 2.5s. That is why the goroutine alarm is set high, and why the instance is sized
+# for concurrency rather than for memory.
 ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -r \
   -i 9094 \
@@ -39,17 +53,29 @@ ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -admin-addr 127.0.0.1:9095 \
   -log-level warn \
   -utc-timing https://time.akamai.com/?iso \
-  -idle-sweep 3600
+  -idle-sweep 3600 \
+  -w \
+  -wait-timeout-ms 2500
 
 Restart=always
 RestartSec=2
 
-# A guard, not a working limit. Steady state with the encoder's DELETEs is ~1.2GB;
-# GOMEMLIMIT makes Go collect harder as it approaches the ceiling so that a slow
-# leak shows up as CPU rather than as an OOM kill, and MemoryMax stops a runaway
-# from taking the host down with it.
-Environment=GOMEMLIMIT=3500MiB
-MemoryMax=4G
+# A guard, not a working limit. Measured steady state is ~25MB.
+#
+# Expressed as a PERCENTAGE so it scales with the instance. A fixed 4G was wrong in
+# both directions: too small for a large ABR ladder, because the sweeper's own bound
+# is bitrate x idle-sweep and 20 Mbps at 3600s is ~9GB - the process would be killed
+# while working correctly; and needlessly large on a small instance.
+#
+# Its purpose is to make a runaway die inside its own cgroup rather than invoking the
+# kernel OOM killer, which might take sshd or the SSM agent instead.
+MemoryMax=25%
+
+# GOMEMLIMIT is deliberately NOT set. It would have to be kept consistent with
+# MemoryMax by hand, and it buys nothing here: in a real runaway the memory is live
+# (files held in a map), so a harder-working collector cannot reclaim it - it would
+# only burn CPU and delay an inevitable kill. Go's default pacing keeps the heap at
+# roughly twice the live set, which at 25MB is nowhere near any limit.
 
 # Filesystem hardening. The process needs to read its config and write content;
 # nothing else.
