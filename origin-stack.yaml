@@ -844,6 +844,128 @@ Resources:
           ]
         }
 
+  # ---------------- Operator buttons ----------------
+  # Two SSM documents so a non-technical operator never has to open a shell or
+  # remember a command: Systems Manager > Run Command > pick one > Run.
+  #
+  # The CHECK document exists because the most common incident is not a broken
+  # origin at all - it is the encoder having stopped, or initialisation segments
+  # missing after a restart. Both look like "the stream is broken" and neither is
+  # fixed by touching this server. Rebooting when init segments are missing makes
+  # it WORSE: it clears RAM again and the encoder still has to be restarted.
+  CheckDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${ChannelPrefix}-1-CHECK-stream-status'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          READ ONLY. Safe to run at any time, changes nothing. Reports in plain
+          English whether the stream is healthy and, if not, what to do about it.
+        mainSteps:
+          - action: aws:runShellScript
+            name: checkStream
+            inputs:
+              timeoutSeconds: '60'
+              runCommand:
+                - |
+                  echo "==============================================="
+                  H=$(curl -s --max-time 5 http://127.0.0.1:9095/-/healthz)
+                  if [ -z "$H" ]; then
+                    echo " PROBLEM: this server is not responding."
+                    echo ""
+                    echo " WHAT TO DO: run the document ending in 2-RESTART-origin-service."
+                    echo " Do not reboot the server - a restart is faster and does the same thing."
+                    echo "==============================================="
+                    exit 0
+                  fi
+                  AGE=$(echo "$H" | grep -o '"last_ingest_age_s":[-0-9]*' | cut -d: -f2)
+                  FILES=$(echo "$H" | grep -o '"files":[0-9]*' | cut -d: -f2)
+                  MPD=$(ls /dev/null 2>/dev/null; curl -s --max-time 5 "http://127.0.0.1:9094/${StreamName}.mpd")
+                  INIT=$(echo "$MPD" | grep -o 'initialization="[^"]*"' | head -1 | sed 's/.*="//;s/"//')
+                  INITCODE=""
+                  if [ -n "$INIT" ]; then
+                    INITCODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:9094/$INIT")
+                  fi
+
+                  if [ "$AGE" = "-1" ] || [ "$AGE" -gt 60 ] 2>/dev/null; then
+                    echo " PROBLEM: no video is arriving from the encoder."
+                    echo ""
+                    echo " Nothing is wrong with this server. It is waiting for video."
+                    echo " WHAT TO DO: check Elemental Live is running and its output is started."
+                    echo " Do NOT reboot or restart this server - it will not help."
+                    echo "==============================================="
+                    exit 0
+                  fi
+
+                  if [ -n "$INIT" ] && [ "$INITCODE" != "200" ]; then
+                    echo " PROBLEM: people already watching are fine, but NEW viewers cannot start."
+                    echo ""
+                    echo " A start-up file the players need is missing. This happens after this"
+                    echo " server restarts, because the encoder only sends that file when its"
+                    echo " output starts."
+                    echo ""
+                    echo " WHAT TO DO: restart the OUTPUT GROUP in Elemental Live."
+                    echo " Do NOT reboot or restart this server - that makes it worse."
+                    echo "==============================================="
+                    exit 0
+                  fi
+
+                  echo " OK - the stream is healthy."
+                  echo ""
+                  echo "   video arriving:      ${AGE}s ago  (0-2s is normal)"
+                  echo "   segments in memory:  ${FILES}"
+                  echo "   start-up file:       ${INITCODE:-n/a}  (200 = fine)"
+                  echo ""
+                  echo " If viewers still report problems, it is not this server."
+                  echo " Check the player, or the CloudWatch dashboard for viewer errors."
+                  echo "==============================================="
+
+  RestartDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${ChannelPrefix}-2-RESTART-origin-service'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          Restarts the streaming software. Takes about 5 seconds. Use this instead
+          of rebooting the server - it does the same thing far faster. AFTERWARDS
+          YOU MUST RESTART THE ELEMENTAL LIVE OUTPUT GROUP.
+        mainSteps:
+          - action: aws:runShellScript
+            name: restartOrigin
+            inputs:
+              timeoutSeconds: '120'
+              runCommand:
+                - |
+                  echo "Restarting the streaming software..."
+                  systemctl restart gochunked
+                  sleep 5
+                  H=$(curl -s --max-time 5 http://127.0.0.1:9095/-/healthz)
+                  echo "==============================================="
+                  if [ -z "$H" ]; then
+                    echo " IT DID NOT COME BACK. Escalate - do not keep retrying."
+                    echo "==============================================="
+                    exit 1
+                  fi
+                  echo " The software restarted and is running."
+                  echo ""
+                  echo " *** NOW RESTART THE OUTPUT GROUP IN ELEMENTAL LIVE. ***"
+                  echo ""
+                  echo " The restart cleared this server's memory. Until the encoder"
+                  echo " output is restarted, people already watching will be fine but"
+                  echo " NEW viewers cannot start."
+                  echo ""
+                  echo " Then run the document ending in 1-CHECK-stream-status to confirm."
+                  echo "==============================================="
+
+
 Outputs:
   InstanceId:
     Value: !Ref OriginInstance
@@ -873,6 +995,12 @@ Outputs:
       SUBSCRIBE SOMETHING TO THIS. A topic with no subscription raises alarms
       nobody sees. aws sns subscribe --topic-arn <this> --protocol email --notification-endpoint you@example.com
     Value: !Ref AlarmTopic
+
+  OperatorRunCommandConsole:
+    Description: >-
+      Give this to whoever operates the stream. Systems Manager > Run Command >
+      choose the document starting 1-CHECK before doing anything else.
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/systems-manager/run-command/executing-commands?region=${AWS::Region}'
 
   AdminCheck:
     Description: Health and metrics, localhost only, over SSM

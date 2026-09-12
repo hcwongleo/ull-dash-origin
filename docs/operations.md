@@ -6,19 +6,11 @@ whole-file origin cannot go below one segment duration.
 
 Everything here runs in **your** account. Nothing depends on the supplier's.
 
-## What is in this archive
+## What you need
 
-```
-bin/go-chunked-streaming-server-arm64    statically linked, no runtime deps
-bin/go-chunked-streaming-server-amd64
-install.sh                               idempotent installer
-deploy/gochunked.service                 systemd unit
-deploy/cors.json
-origin-stack.yaml                        the CloudFormation template
-src/                                      full source, MIT
-CHANGES-VS-UPSTREAM.txt                   our fixes, as commits
-SHA256SUMS
-```
+One file: **`origin-stack.yaml`**, from the root of the repository. The template
+builds the server on the instance from a pinned git tag at first boot, so there is
+nothing to compile, upload or stage.
 
 ## Deploy
 
@@ -127,6 +119,72 @@ own DELETE requests — measured at 27,507 in a single 5-hour session. An earlie
 build had a retention subsystem; it proved redundant and its tuning had to track
 encoder settings, so it was removed.
 
+## If something looks wrong — start here
+
+**Do not reboot the server.** For the most common problem, rebooting makes it worse.
+There are two buttons, and the first one tells you which one you need.
+
+### Step 1 — always do this first
+
+AWS console → **Systems Manager** → **Run Command** → **Run command** →
+choose the document ending **`1-CHECK-stream-status`** → pick the origin instance →
+**Run**.
+
+It changes nothing. It is safe to run at any time, as often as you like. Open the
+output and it will say one of four things:
+
+| It says | What it means | What you do |
+|---|---|---|
+| **OK — the stream is healthy** | The server is fine | The problem is not here. Check the player, or the dashboard for viewer errors |
+| **no video is arriving from the encoder** | The server is waiting for video | **Check Elemental Live.** Its output has stopped. Do *not* touch this server |
+| **NEW viewers cannot start** | A start-up file is missing after a restart | **Restart the output group in Elemental Live.** Do *not* reboot — that makes it worse |
+| **this server is not responding** | The software has stopped | Go to step 2 |
+
+Three of those four answers do **not** involve touching this server. That is why you
+run the check first.
+
+### Step 2 — only if the check told you to
+
+Same place: **Run Command** → the document ending **`2-RESTART-origin-service`** →
+same instance → **Run**. Takes about 5 seconds.
+
+**Then restart the output group in Elemental Live.** The restart clears this
+server's memory, so until you do, people already watching are fine but **new
+viewers cannot start**. The document reminds you.
+
+Then run the check again to confirm.
+
+### Why not just reboot?
+
+A reboot and a service restart have the **same** effect on the stream — both clear
+the server's memory, and both need the Elemental output restarted afterwards. But
+a reboot takes 1–2 minutes and a restart takes 5 seconds.
+
+So a reboot is slower for no benefit. Only reboot if someone technical tells you to.
+
+### The one trap worth remembering
+
+If **people already watching are fine but new viewers cannot start**, that means the
+server restarted at some point. The fix is *entirely* in Elemental Live — restart
+the output group. Rebooting or restarting this server again will clear its memory
+once more and leave you in exactly the same place.
+
+### What is watched automatically
+
+You do not need to poll anything. Emails arrive at the address subscribed to the
+alarm topic when:
+
+| Alarm | Means |
+|---|---|
+| `ingest-stale` | no video arriving for over a minute, or the server stopped answering |
+| `heap` | memory unexpectedly high |
+| `goroutines` | requests are getting stuck |
+| `cpu` | the server is working far harder than it should |
+| `host-check-failed` | AWS hardware problem. **After it recovers, run the check** — memory will have been cleared |
+
+The software also restarts itself if it crashes (about 2 seconds) or stops
+responding (within about a minute), without anyone doing anything.
+
 ## Monitoring
 
 Localhost only, so nothing is exposed:
@@ -179,29 +237,33 @@ development: the window had been guarding an instance terminated days earlier.
 Covers scheduled reboot, stop and terminate including retirement. Does **not**
 cover expedited hardware events or network maintenance.
 
-### Alarm on playback errors
+### Why there is no CloudFront alarm
 
-Must be in **us-east-1** — that is the only region CloudFront publishes metrics to.
+CloudWatch alarms are regional and CloudFront publishes its metrics **only** to
+us-east-1 — verified: `AWS/CloudFront` has 0 metrics in ap-east-1 and 100 in
+us-east-1. An alarm in the origin's region would sit in `OK` forever and never
+fire, which is worse than none because it looks like coverage.
 
-```bash
-aws cloudwatch put-metric-alarm --region us-east-1 \
-  --alarm-name ull-origin-playback-5xx \
-  --namespace AWS/CloudFront --metric-name 5xxErrorRate \
-  --dimensions Name=DistributionId,Value=<playback-distribution-id> Name=Region,Value=Global \
-  --statistic Average --period 300 --evaluation-periods 1 --threshold 5 \
-  --comparison-operator GreaterThanThreshold \
-  --treat-missing-data notBreaching \
-  --alarm-actions <sns-topic-arn>
-```
+Putting one in us-east-1 means a second stack, a second SNS topic and a second
+email confirmation, for a single metric that is a **rate** — so it is silent until
+you have an audience. The origin-side alarms have no such blind spot: if the origin
+stops answering, `ingest-stale` fires, because the publisher deliberately sends
+nothing and missing data is treated as breaching.
 
-It is a **rate**, so at low viewership it reports insufficient data rather than
-alarming. The origin-side counters above fire regardless of viewer traffic and
-generally earlier, because they see causes rather than symptoms.
+CloudFront errors remain fully visible on the dashboard, which *can* graph across
+regions. You lose the notification, not the visibility.
 
-### Consider EC2 auto-recovery
+### EC2 auto-recovery is already on
 
-Nothing currently restarts a failed host. A `StatusCheckFailed_System` alarm with
-a `recover` action closes that gap and costs nothing.
+Nothing to do. Verified on both instances: `MaintenanceOptions.AutoRecovery` is
+`default`, which AWS enables on supported instance types. If the underlying host
+fails, AWS migrates the instance to new hardware keeping the **same instance ID,
+private IP and Elastic IP** — so the encoder's destination never changes.
+
+Two things it does *not* do. It does not notify, which is what the
+`host-check-failed` alarm is for. And recovery is a stop/start, so **memory is
+cleared** — run the CHECK document afterwards, because new viewers may need the
+Elemental output restarted.
 
 ## Security — read before going live
 
