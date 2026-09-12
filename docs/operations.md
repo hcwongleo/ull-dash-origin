@@ -85,6 +85,11 @@ the **Version to deploy** parameter to the new version → **Update stack**.
 
 Takes about 5 minutes and **replaces the server**.
 
+When the parameter form appears it shows the values your stack is **currently**
+using, not the template's defaults. Change only the version and leave the rest —
+that is deliberate, so an upgrade never quietly changes your instance size or
+anything else.
+
 **Why this is the recommended way:** if the new version fails to build or start,
 CloudFormation notices, gives up, and **puts the old server back automatically.** A
 broken fix cannot leave you with a broken stream. The Elastic IP moves across, so
