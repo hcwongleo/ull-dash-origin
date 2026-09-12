@@ -88,7 +88,9 @@ live stream; the template rejects it.
 
 ## What was fixed
 
-Nine changes against upstream. The first is the one that matters.
+Nine changes against upstream. The first is the one that matters. Full
+feature-by-feature account, including what was removed and why:
+**[docs/changes-vs-upstream.md](docs/changes-vs-upstream.md)**.
 
 | Fix | Measured effect |
 |---|---|
