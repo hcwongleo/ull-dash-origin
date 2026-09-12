@@ -3,7 +3,9 @@
 Everything about how this origin works and why, including the low-level design of
 the Go server. If you are deploying or operating it, read
 [operations.md](operations.md) instead. A visual walkthrough of the same material is
-in [architecture.html](architecture.html).
+in [architecture.html](architecture.html), and a single segment traced from encoder to
+viewer — with the endpoints and the CPU cost of each step — in
+[segment-journey.html](segment-journey.html).
 
 ---
 

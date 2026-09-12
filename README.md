@@ -48,6 +48,7 @@ a dashboard, and three operator buttons in Systems Manager.
 | **[docs/operations.md](docs/operations.md)** | deploy, operate, upgrade, troubleshoot. Written for whoever runs the stream |
 | **[docs/design.md](docs/design.md)** | every feature and why, the architecture, and the low-level design of the server |
 | **[docs/architecture.html](docs/architecture.html)** | the same design, animated. Open it locally |
+| **[docs/segment-journey.html](docs/segment-journey.html)** | one segment traced from encoder to viewer — every endpoint, what Go does at each step, and the CPU it costs |
 
 ## Status — read this first
 
