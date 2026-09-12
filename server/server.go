@@ -25,6 +25,7 @@ type Options struct {
 	UTCTiming                    string
 	InitPattern                  string
 	IdleSweep                    time.Duration
+	WaitTimeout                  time.Duration
 	Port                         int
 	CertFilePath                 string
 	KeyFilePath                  string
@@ -81,9 +82,11 @@ func StartHTTPServer(o Options) error {
 	}
 	log.Printf("CORS: %s", cors.String())
 
+	SetWaitTimeout(o.WaitTimeout)
+
 	var waitingRequests *WaitingRequests = nil
 	if waitForDataToArrive {
-		log.Printf("Using waiting requests map")
+		log.Printf("holding GETs for not-yet-arrived segments for up to %s; this MUST exceed the MPD availabilityTimeOffset", requestExpiration())
 		waitingRequests = NewWaitingRequests()
 	}
 

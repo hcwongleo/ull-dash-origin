@@ -50,6 +50,13 @@ var (
 	idleSweepS  = flag.Int64("idle-sweep", 3600, "Reclaim complete, non-init files whose last write is older than this many seconds. Must comfortably exceed the MPD timeShiftBufferDepth. 0 disables, and then anything the encoder never deletes accumulates until the process restarts")
 	initPattern = flag.String("init-pattern", server.DefaultInitPattern, "Names matching this are never swept. An initialisation segment is PUT once and needed by every later viewer for the life of the stream, so it looks idle while being essential. Empty disables the exemption")
 
+	// MUST exceed the MPD's availabilityTimeOffset. The manifest tells players how
+	// early they may request a segment; holding for less than that means refusing
+	// requests you invited, and every retry moves the player's position. Upstream
+	// hardcoded 1000ms, which against an availabilityTimeOffset of 1.800 produced
+	// exactly that - the fluctuating live latency seen in testing.
+	waitTimeoutMs = flag.Int64("wait-timeout-ms", 2500, "Ceiling on how long a GET for a not-yet-arrived segment is held before it 404s. MUST exceed the MPD availabilityTimeOffset, or you refuse requests the manifest invited. Only used with -w. The hold releases as soon as data arrives, so this is a ceiling and not added latency")
+
 	utcTimingURL = flag.String("utc-timing", "https://time.akamai.com/?iso", "URL injected as the DASH UTCTiming value on manifest ingest, using the http-iso scheme. Empty disables injection")
 )
 
@@ -77,6 +84,7 @@ func main() {
 		UTCTiming:                    *utcTimingURL,
 		IdleSweep:                    time.Duration(*idleSweepS) * time.Second,
 		InitPattern:                  *initPattern,
+		WaitTimeout:                  time.Duration(*waitTimeoutMs) * time.Millisecond,
 		GitSHA:                       gitSHA,
 	}))
 }

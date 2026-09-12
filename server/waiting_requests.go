@@ -5,12 +5,46 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-const defaultRequestExpiration time.Duration = 1000 * time.Millisecond
+// How long a GET for a not-yet-present segment is held before it 404s.
+//
+// MUST EXCEED the MPD's availabilityTimeOffset. That is not a style preference: the
+// manifest tells players how early they may ask, and holding for less time than that
+// means refusing requests you invited. Upstream hardcoded 1000ms; with an
+// availabilityTimeOffset of 1.800 that stalled players for ~1.2s and then 404'd
+// them, and every retry moved their position - which is where fluctuating live
+// latency came from.
+//
+// Configurable rather than derived, because deriving it from the manifest would
+// couple the origin to the encoder's DASH configuration, and every such coupling in
+// this server has silently broken when the encoder was reconfigured. A generous
+// fixed value cannot.
+const defaultRequestExpirationFallback time.Duration = 2500 * time.Millisecond
+
+var requestExpirationMs atomic.Int64
+
+// SetWaitTimeout configures how long a GET is held for a segment that has not
+// arrived. Zero or negative restores the default.
+func SetWaitTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultRequestExpirationFallback
+	}
+	requestExpirationMs.Store(d.Milliseconds())
+}
+
+func requestExpiration() time.Duration {
+	if ms := requestExpirationMs.Load(); ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+
+	return defaultRequestExpirationFallback
+}
+
 const defaultRequestCleanUpEvery time.Duration = 100 * time.Millisecond
 
 const (
@@ -57,7 +91,7 @@ func (brs *WaitingRequests) AddWaitingRequest(name string, headers http.Header) 
 	found = false
 	nowStart := time.Now()
 	// This is modified Expires, instead of HTTP-date timestamp uses duration in seconds (Ex: "Expires: in=10")
-	expiration := brs.getExpiresInOr(headers.Get("Expires"), defaultRequestExpiration)
+	expiration := brs.getExpiresInOr(headers.Get("Expires"), requestExpiration())
 
 	uidStr := uuid.New().String()
 	br := WaitingRequest{
