@@ -156,6 +156,17 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 			return
 		}
 	}
+	// An initialisation segment is PUT once per encoder run and is needed by every
+	// viewer who joins later, so it is the one thing worth surviving a restart.
+	// Media segments stay in RAM: persisting those would add a disk write per
+	// segment for no benefit.
+	if IsInit(name) {
+		f.lock.RLock()
+		body := append([]byte(nil), f.buffer...)
+		f.lock.RUnlock()
+		PersistInit(name, headers, body)
+	}
+
 	addCors(w, cors)
 	w.WriteHeader(http.StatusNoContent)
 

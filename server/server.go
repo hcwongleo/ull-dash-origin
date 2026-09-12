@@ -26,6 +26,7 @@ type Options struct {
 	InitPattern                  string
 	IdleSweep                    time.Duration
 	WaitTimeout                  time.Duration
+	PersistInit                  bool
 	Port                         int
 	CertFilePath                 string
 	KeyFilePath                  string
@@ -83,6 +84,16 @@ func StartHTTPServer(o Options) error {
 	log.Printf("CORS: %s", cors.String())
 
 	SetWaitTimeout(o.WaitTimeout)
+
+	// Set up persistence AFTER the init pattern, which decides what qualifies, and
+	// reload before the listener opens so a viewer never sees a gap.
+	if o.PersistInit {
+		SetPersistDir(basePath)
+		LoadPersisted()
+	} else {
+		SetPersistDir("")
+		logWarnf("-persist-init is off: after any restart, new viewers cannot play until the Elemental output group is restarted")
+	}
 
 	var waitingRequests *WaitingRequests = nil
 	if waitForDataToArrive {

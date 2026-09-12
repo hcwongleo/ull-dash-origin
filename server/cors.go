@@ -6,14 +6,14 @@ import (
 	"os"
 )
 
-//  corsData Raw data of CORS config
+// corsData Raw data of CORS config
 type CorsData struct {
 	AllowedMethods []string `json:"AllowedMethods"`
 	AllowedOrigins []string `json:"AllowedOrigins"`
 	AllowedHeaders []string `json:"AllowedHeaders"`
 }
 
-//  corsData Raw data of CORS config
+// corsData Raw data of CORS config
 type Cors struct {
 	Data   CorsData
 	Loaded bool

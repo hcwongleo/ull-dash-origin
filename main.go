@@ -55,6 +55,12 @@ var (
 	// requests you invited, and every retry moves the player's position. Upstream
 	// hardcoded 1000ms, which against an availabilityTimeOffset of 1.800 produced
 	// exactly that - the fluctuating live latency seen in testing.
+	// Initialisation segments are the one thing worth keeping across a restart:
+	// Elemental Live sends them only when an output group starts, so a restart
+	// otherwise leaves the stream unable to accept NEW viewers until somebody
+	// restarts the encoder. They are a few hundred bytes and arrive once per run.
+	persistInit = flag.Bool("persist-init", true, "Write initialisation segments under <content path>/init so they survive a restart, and reload them at start. Media segments are never written to disk")
+
 	waitTimeoutMs = flag.Int64("wait-timeout-ms", 2500, "Ceiling on how long a GET for a not-yet-arrived segment is held before it 404s. MUST exceed the MPD availabilityTimeOffset, or you refuse requests the manifest invited. Only used with -w. The hold releases as soon as data arrives, so this is a ceiling and not added latency")
 
 	utcTimingURL = flag.String("utc-timing", "https://time.akamai.com/?iso", "URL injected as the DASH UTCTiming value on manifest ingest, using the http-iso scheme. Empty disables injection")
@@ -85,6 +91,7 @@ func main() {
 		IdleSweep:                    time.Duration(*idleSweepS) * time.Second,
 		InitPattern:                  *initPattern,
 		WaitTimeout:                  time.Duration(*waitTimeoutMs) * time.Millisecond,
+		PersistInit:                  *persistInit,
 		GitSHA:                       gitSHA,
 	}))
 }

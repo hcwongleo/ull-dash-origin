@@ -33,6 +33,18 @@ var (
 	buildSHA = "unknown"
 )
 
+// noteIngest records ingest activity for the metrics.
+//
+// MULTI-CHANNEL LIMITATION: this is global, not per channel. If two channels share
+// an origin and one stops, the other keeps last_ingest_age at 0 and the ingest-stale
+// alarm never fires. Making it per-channel would require the server to have a notion
+// of "channel", which means deriving one from path names - a coupling to the
+// encoder's naming that has broken every time it has been tried here.
+//
+// One origin per channel avoids the problem entirely and buys independent restarts,
+// independent alarms and independent sizing. Given the origin is a small fraction of
+// the CDN bill, sharing one to save money couples failures across channels for very
+// little.
 func noteIngest(n int) {
 	ingestBytesTotal.Add(int64(n))
 	lastIngestUnix.Store(time.Now().Unix())

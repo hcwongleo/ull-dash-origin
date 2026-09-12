@@ -121,6 +121,27 @@ afterwards. The button prints that reminder.
 
 Use the stack update unless the minutes matter.
 
+## Running more than one channel on this origin
+
+It works — channels never collide, because every filename carries the stream name,
+and initialisation segments are stored per channel. Verified by test.
+
+**But two things do not scale with channels:**
+
+**The stream-down alarm becomes blind.** `ingest-stale` watches whether *anything*
+is arriving. If two channels share an origin and one stops, the other keeps the
+metric healthy and no alarm fires. Making it per-channel would mean teaching the
+origin what a "channel" is by parsing filenames — a coupling to encoder naming that
+has silently broken every time it has been tried here.
+
+**Memory scales with channels × renditions × window**, and a restart affects every
+channel at once.
+
+**So one origin per channel is usually the better trade.** It gives independent
+restarts, independent alarms and independent sizing, and the origin is a small
+fraction of the CDN bill — sharing one to save a few hundred dollars a month couples
+failures across channels for very little.
+
 ## Configuration
 
 Five flags, in `deploy/gochunked.service`. **None depends on your DASH
