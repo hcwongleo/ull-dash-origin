@@ -190,7 +190,9 @@ func sweepOnce(now time.Time) int {
 
 	for _, c := range swept {
 		c.file.Discard()
-		logInfof("swept %s, idle longer than %ds", c.key, maxAge)
+		// warn, not info: the production level is warn, and "I deleted a file"
+		// is exactly the line you want present when something unexpected happens.
+		logWarnf("swept %s, idle longer than %ds", c.key, maxAge)
 	}
 
 	SweptTotal.Add(int64(len(swept)))

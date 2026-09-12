@@ -59,8 +59,18 @@ install -o root -g root -m 0755 "$binary" "$PREFIX/bin/go-chunked-streaming-serv
 install -o root -g root -m 0644 "$here/cors.json" "$PREFIX/cors.json"
 install -m 0644 "$here/$SERVICE.service" "/etc/systemd/system/$SERVICE.service"
 
+# Metrics publisher and health watchdog. Both are timers, so a failure in either
+# cannot take the origin down with it.
+install -o root -g root -m 0755 "$here/publish-metrics.sh" "$PREFIX/bin/publish-metrics.sh"
+for unit in publish-metrics.service publish-metrics.timer \
+            gochunked-healthcheck.service gochunked-healthcheck.timer; do
+  install -m 0644 "$here/$unit" "/etc/systemd/system/$unit"
+done
+
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+systemctl enable --now publish-metrics.timer >/dev/null 2>&1 || true
+systemctl enable --now gochunked-healthcheck.timer >/dev/null 2>&1 || true
 echo "installed $(uname -m) binary to $PREFIX/bin/"
 
 if [ "$RESTART" = "1" ]; then

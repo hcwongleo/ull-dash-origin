@@ -1,0 +1,9 @@
+[Unit]
+Description=Publish ULL-DASH origin metrics to CloudWatch
+After=network-online.target gochunked.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gochunked/bin/publish-metrics.sh
+# Runs as root only because it needs the instance role via IMDS; it writes nothing.
+User=root

@@ -65,10 +65,13 @@ Metadata:
         Parameters: [EncoderCidr]
       - Label: { default: 'Usually leave alone' }
         Parameters: [ReleaseTag, StreamName, InstanceType, ChannelPrefix]
+      - Label: { default: 'Monitoring' }
+        Parameters: [AlarmEmail, HeapAlarmBytes, IngestStaleAlarmSeconds, MetricNamespace]
       - Label: { default: 'Advanced' }
         Parameters: [RepoUrl, AmiId, OriginPort, CloudFrontOriginPrefixList, SegmentCacheSeconds]
     ParameterLabels:
       EncoderCidr: { default: 'Elemental Live public IP (as a /32)' }
+      AlarmEmail: { default: 'Email for alarms (optional)' }
       ReleaseTag: { default: 'Version to deploy' }
       StreamName: { default: 'Stream name' }
       InstanceType: { default: 'Instance size' }
@@ -118,7 +121,7 @@ Parameters:
 
   ReleaseTag:
     Type: String
-    Default: v0.3.0
+    Default: v0.4.0
     Description: >-
       Git tag to build. Pinned, so a redeploy always produces the same binary.
       The instance clones this tag and compiles it at first boot - dependencies
@@ -132,6 +135,33 @@ Parameters:
   OriginPort:
     Type: Number
     Default: 9094
+
+  MetricNamespace:
+    Type: String
+    Default: ULLOrigin
+    Description: CloudWatch namespace for the origin's own metrics. The instance role is scoped to this namespace and nothing else.
+
+  AlarmEmail:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. An address subscribed to the alarm topic. Leave empty to create the
+      topic without subscribers and add them yourself - a topic with no
+      subscription raises alarms nobody sees.
+
+  HeapAlarmBytes:
+    Type: Number
+    Default: 1073741824
+    Description: >-
+      Alarm above this heap. Default 1 GB: ~40x the measured steady state of 25 MB
+      for a 4 Mbps stream, and 4x below MemoryMax, so it warns well before the kill.
+
+  IngestStaleAlarmSeconds:
+    Type: Number
+    Default: 60
+    Description: >-
+      Alarm when no bytes have been ingested for this long. This is the only signal
+      that the stream is off the air; nothing else reports it.
 
   CloudFrontOriginPrefixList:
     Type: String
@@ -149,6 +179,9 @@ Parameters:
   SegmentCacheSeconds:
     Type: Number
     Default: 21600
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Rules:
   RejectOpenEncoderCidr:
@@ -280,10 +313,24 @@ Resources:
           - Effect: Allow
             Principal: { Service: ec2.amazonaws.com }
             Action: sts:AssumeRole
-      # SSM only. The build comes from a public git tag, so the instance needs no
-      # S3 access and there is no bucket policy or artifact staging to get wrong.
+      # SSM for access; PutMetricData so the origin's own metrics reach CloudWatch.
+      # The build comes from a public git tag, so no S3 access is needed and there
+      # is no bucket policy or artifact staging to get wrong.
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: publish-own-metrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # PutMetricData takes no resource ARN; the namespace condition is the
+              # only way to scope it, and it stops this role writing anywhere else.
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Ref MetricNamespace
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -434,6 +481,157 @@ Resources:
           - ErrorCode: 504
             ErrorCachingMinTTL: 0
 
+  # ---------------- Monitoring ----------------
+  # /-/metrics is bound to localhost, so without this the numbers worth alarming on
+  # are unreachable. A systemd timer on the instance scrapes them into this
+  # namespace every 5 minutes; see deploy/publish-metrics.sh.
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ChannelPrefix}-origin-alarms'
+      DisplayName: ULL-DASH origin alarms
+
+  AlarmEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # The highest-value alarm, and nothing to do with leaks: it is the only thing
+  # that reports the stream is off the air without a viewer complaining.
+  #
+  # TreatMissingData: breaching is deliberate. The publisher deliberately sends
+  # NOTHING when the origin's admin endpoint does not answer, because a zero would
+  # be indistinguishable from a healthy reading. Absent data therefore means the
+  # origin is not answering, which is exactly when this should fire.
+  IngestStaleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ChannelPrefix}-origin-ingest-stale'
+      AlarmDescription: No bytes ingested recently, or the origin is not answering at all. The stream is probably off the air.
+      Namespace: !Ref MetricNamespace
+      MetricName: LastIngestAgeSeconds
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OriginInstance
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref IngestStaleAlarmSeconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  # Heap should plateau. Sustained growth is the shape every leak in this server
+  # has taken, and the OOM kill it leads to empties RAM - which loses the
+  # initialisation segments and needs an encoder restart.
+  HeapAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ChannelPrefix}-origin-heap'
+      AlarmDescription: Heap well above steady state. Check whether the encoder has stopped sending DELETEs.
+      Namespace: !Ref MetricNamespace
+      MetricName: HeapAllocBytes
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OriginInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: !Ref HeapAlarmBytes
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # Goroutines reveal leaked readers or ingests earlier and more cheaply than heap.
+  GoroutineAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ChannelPrefix}-origin-goroutines'
+      AlarmDescription: Goroutines climbing. Readers or ingests are not being released.
+      Namespace: !Ref MetricNamespace
+      MetricName: Goroutines
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref OriginInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 2000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # One URL that answers "is the stream up, is memory fine, is anything alarming",
+  # so an operator does not need an SSM session to find out. The first three
+  # dashboards in an account are free.
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ChannelPrefix}-origin'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            { "type": "alarm", "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": { "title": "Alarms",
+                "alarms": [ "${IngestStaleAlarm.Arn}", "${HeapAlarm.Arn}", "${GoroutineAlarm.Arn}" ] } },
+
+            { "type": "metric", "x": 0, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Ingest age - is the stream on air?",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Maximum", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "seconds" } },
+                "metrics": [ [ "${MetricNamespace}", "LastIngestAgeSeconds", "InstanceId", "${OriginInstance}" ] ],
+                "annotations": { "horizontal": [
+                  { "label": "stale", "value": ${IngestStaleAlarmSeconds}, "color": "#d13212" } ] } } },
+
+            { "type": "metric", "x": 12, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Heap - should plateau, not climb",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "bytes" } },
+                "metrics": [ [ "${MetricNamespace}", "HeapAllocBytes", "InstanceId", "${OriginInstance}" ] ],
+                "annotations": { "horizontal": [
+                  { "label": "alarm", "value": ${HeapAlarmBytes}, "color": "#d13212" } ] } } },
+
+            { "type": "metric", "x": 0, "y": 8, "width": 8, "height": 6,
+              "properties": {
+                "title": "Goroutines / files held",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
+                "metrics": [
+                  [ "${MetricNamespace}", "Goroutines", "InstanceId", "${OriginInstance}" ],
+                  [ "${MetricNamespace}", "FilesHeld", "InstanceId", "${OriginInstance}" ] ] } },
+
+            { "type": "metric", "x": 8, "y": 8, "width": 8, "height": 6,
+              "properties": {
+                "title": "Swept / aborted - both should stay flat",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Maximum", "period": 300,
+                "metrics": [
+                  [ "${MetricNamespace}", "SweptTotal", "InstanceId", "${OriginInstance}" ],
+                  [ "${MetricNamespace}", "PutAbortedTotal", "InstanceId", "${OriginInstance}" ] ] } },
+
+            { "type": "metric", "x": 16, "y": 8, "width": 8, "height": 6,
+              "properties": {
+                "title": "Instance CPU and egress",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
+                "metrics": [
+                  [ "AWS/EC2", "CPUUtilization", "InstanceId", "${OriginInstance}" ],
+                  [ "AWS/EC2", "NetworkOut", "InstanceId", "${OriginInstance}", { "yAxis": "right" } ] ] } },
+
+            { "type": "metric", "x": 0, "y": 14, "width": 24, "height": 6,
+              "properties": {
+                "title": "Playback CloudFront - requests and 5xx rate (us-east-1)",
+                "region": "us-east-1", "view": "timeSeries", "period": 300,
+                "metrics": [
+                  [ "AWS/CloudFront", "Requests", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "stat": "Sum" } ],
+                  [ "AWS/CloudFront", "5xxErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "stat": "Average", "yAxis": "right" } ] ] } }
+          ]
+        }
+
+
 Outputs:
   InstanceId:
     Value: !Ref OriginInstance
@@ -453,6 +651,16 @@ Outputs:
   OriginEipAddress:
     Description: Stable ingest address. Survives stop/start; re-pointing the encoder should never be on a recovery path.
     Value: !Ref OriginEip
+
+  DashboardUrl:
+    Description: One URL answering "is the stream up, is memory fine, is anything alarming"
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ChannelPrefix}-origin'
+
+  AlarmTopicArn:
+    Description: >-
+      SUBSCRIBE SOMETHING TO THIS. A topic with no subscription raises alarms
+      nobody sees. aws sns subscribe --topic-arn <this> --protocol email --notification-endpoint you@example.com
+    Value: !Ref AlarmTopic
 
   AdminCheck:
     Description: Health and metrics, localhost only, over SSM

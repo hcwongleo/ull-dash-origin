@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the ULL-DASH origin is answering, every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

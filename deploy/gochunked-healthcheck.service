@@ -1,0 +1,15 @@
+[Unit]
+Description=Restart the ULL-DASH origin if it stops answering
+After=gochunked.service
+
+[Service]
+Type=oneshot
+User=root
+# Two attempts 5s apart before acting, so a single slow response - a GC pause, a
+# burst of ingest - does not cause a restart. A restart costs an encoder restart,
+# so it must be a last resort, not a reflex.
+ExecStart=/bin/sh -c 'curl -sf --max-time 5 http://127.0.0.1:9095/-/healthz >/dev/null && exit 0; \
+  sleep 5; \
+  curl -sf --max-time 5 http://127.0.0.1:9095/-/healthz >/dev/null && exit 0; \
+  logger -t gochunked-healthcheck "admin endpoint unresponsive twice, restarting gochunked"; \
+  systemctl restart gochunked'

@@ -1,0 +1,14 @@
+[Unit]
+Description=Publish ULL-DASH origin metrics every 5 minutes
+
+[Timer]
+# 2 min after boot so the origin is answering before the first scrape.
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Spread load if several origins ever run in one account.
+RandomizedDelaySec=30
+# A missed run while the instance was stopped should not fire a burst on boot.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
