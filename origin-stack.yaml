@@ -163,6 +163,17 @@ Parameters:
       Alarm when no bytes have been ingested for this long. This is the only signal
       that the stream is off the air; nothing else reports it.
 
+  EnableCloudFrontAdditionalMetrics:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      CloudFront's default metrics are free but coarse. The additional metrics -
+      CacheHitRate, OriginLatency and per-status error rates - must be switched on
+      per distribution and cost about USD 2.40/month for this one. CacheHitRate is
+      the one worth paying for: it is the only direct measure of how much viewer
+      traffic is reaching the origin rather than being served from the edge.
+
   CloudFrontOriginPrefixList:
     Type: String
     Default: pl-14b2577d
@@ -182,6 +193,7 @@ Parameters:
 
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+  WantCfAdditionalMetrics: !Equals [!Ref EnableCloudFrontAdditionalMetrics, 'true']
 
 Rules:
   RejectOpenEncoderCidr:
@@ -481,6 +493,18 @@ Resources:
           - ErrorCode: 504
             ErrorCachingMinTTL: 0
 
+  # CloudFront additional metrics are opt-in per distribution. Without this
+  # resource CacheHitRate, OriginLatency and the per-status error rates are not
+  # published at all, and dashboard widgets referencing them stay empty.
+  PlaybackMonitoringSubscription:
+    Type: AWS::CloudFront::MonitoringSubscription
+    Condition: WantCfAdditionalMetrics
+    Properties:
+      DistributionId: !Ref PlaybackDistribution
+      MonitoringSubscription:
+        RealtimeMetricsSubscriptionConfig:
+          RealtimeMetricsSubscriptionStatus: Enabled
+
   # ---------------- Monitoring ----------------
   # /-/metrics is bound to localhost, so without this the numbers worth alarming on
   # are unreachable. A systemd timer on the instance scrapes them into this
@@ -575,62 +599,129 @@ Resources:
       DashboardBody: !Sub |
         {
           "widgets": [
-            { "type": "alarm", "x": 0, "y": 0, "width": 24, "height": 2,
+            { "type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": { "markdown": "## ULL-DASH origin \u2014 ${ChannelPrefix}\n**Is the stream on air?** Ingest age should sit at 0\u20132 s. **Is memory healthy?** Heap should be flat. **Are viewers being served from the edge?** Cache hit rate should be high \u2014 a low rate means every viewer is reaching the origin." } },
+
+            { "type": "alarm", "x": 0, "y": 2, "width": 24, "height": 2,
               "properties": { "title": "Alarms",
                 "alarms": [ "${IngestStaleAlarm.Arn}", "${HeapAlarm.Arn}", "${GoroutineAlarm.Arn}" ] } },
 
-            { "type": "metric", "x": 0, "y": 2, "width": 12, "height": 6,
+            { "type": "text", "x": 0, "y": 4, "width": 24, "height": 1,
+              "properties": { "markdown": "### Origin \u2014 from inside the instance, published every 5 min by a systemd timer" } },
+
+            { "type": "metric", "x": 0, "y": 5, "width": 8, "height": 6,
               "properties": {
-                "title": "Ingest age - is the stream on air?",
+                "title": "Ingest age \u2014 is the encoder pushing?",
                 "region": "${AWS::Region}", "view": "timeSeries", "stat": "Maximum", "period": 300,
                 "yAxis": { "left": { "min": 0, "label": "seconds" } },
-                "metrics": [ [ "${MetricNamespace}", "LastIngestAgeSeconds", "InstanceId", "${OriginInstance}" ] ],
-                "annotations": { "horizontal": [
-                  { "label": "stale", "value": ${IngestStaleAlarmSeconds}, "color": "#d13212" } ] } } },
+                "metrics": [ [ "${MetricNamespace}", "LastIngestAgeSeconds", "InstanceId", "${OriginInstance}", { "label": "seconds since last byte" } ] ],
+                "annotations": { "horizontal": [ { "label": "stale", "value": ${IngestStaleAlarmSeconds}, "color": "#d13212" } ] } } },
 
-            { "type": "metric", "x": 12, "y": 2, "width": 12, "height": 6,
+            { "type": "metric", "x": 8, "y": 5, "width": 8, "height": 6,
               "properties": {
-                "title": "Heap - should plateau, not climb",
+                "title": "Heap \u2014 should plateau, not climb",
                 "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
                 "yAxis": { "left": { "min": 0, "label": "bytes" } },
-                "metrics": [ [ "${MetricNamespace}", "HeapAllocBytes", "InstanceId", "${OriginInstance}" ] ],
-                "annotations": { "horizontal": [
-                  { "label": "alarm", "value": ${HeapAlarmBytes}, "color": "#d13212" } ] } } },
+                "metrics": [ [ "${MetricNamespace}", "HeapAllocBytes", "InstanceId", "${OriginInstance}", { "label": "live heap" } ] ],
+                "annotations": { "horizontal": [ { "label": "alarm", "value": ${HeapAlarmBytes}, "color": "#d13212" } ] } } },
 
-            { "type": "metric", "x": 0, "y": 8, "width": 8, "height": 6,
+            { "type": "metric", "x": 16, "y": 5, "width": 8, "height": 6,
               "properties": {
-                "title": "Goroutines / files held",
+                "title": "Goroutines and files held",
                 "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
                 "metrics": [
-                  [ "${MetricNamespace}", "Goroutines", "InstanceId", "${OriginInstance}" ],
-                  [ "${MetricNamespace}", "FilesHeld", "InstanceId", "${OriginInstance}" ] ] } },
+                  [ "${MetricNamespace}", "Goroutines", "InstanceId", "${OriginInstance}", { "label": "goroutines" } ],
+                  [ "${MetricNamespace}", "FilesHeld", "InstanceId", "${OriginInstance}", { "label": "files in RAM" } ] ] } },
 
-            { "type": "metric", "x": 8, "y": 8, "width": 8, "height": 6,
+            { "type": "metric", "x": 0, "y": 11, "width": 8, "height": 5,
               "properties": {
-                "title": "Swept / aborted - both should stay flat",
+                "title": "Swept and aborted \u2014 both should stay flat",
                 "region": "${AWS::Region}", "view": "timeSeries", "stat": "Maximum", "period": 300,
                 "metrics": [
-                  [ "${MetricNamespace}", "SweptTotal", "InstanceId", "${OriginInstance}" ],
-                  [ "${MetricNamespace}", "PutAbortedTotal", "InstanceId", "${OriginInstance}" ] ] } },
+                  [ "${MetricNamespace}", "SweptTotal", "InstanceId", "${OriginInstance}", { "label": "files swept (cumulative)" } ],
+                  [ "${MetricNamespace}", "PutAbortedTotal", "InstanceId", "${OriginInstance}", { "label": "ingests aborted (cumulative)" } ] ] } },
 
-            { "type": "metric", "x": 16, "y": 8, "width": 8, "height": 6,
+            { "type": "metric", "x": 8, "y": 11, "width": 8, "height": 5,
               "properties": {
-                "title": "Instance CPU and egress",
+                "title": "Instance CPU",
                 "region": "${AWS::Region}", "view": "timeSeries", "stat": "Average", "period": 300,
-                "metrics": [
-                  [ "AWS/EC2", "CPUUtilization", "InstanceId", "${OriginInstance}" ],
-                  [ "AWS/EC2", "NetworkOut", "InstanceId", "${OriginInstance}", { "yAxis": "right" } ] ] } },
+                "yAxis": { "left": { "min": 0, "label": "percent" } },
+                "metrics": [ [ "AWS/EC2", "CPUUtilization", "InstanceId", "${OriginInstance}", { "label": "CPU %" } ] ] } },
 
-            { "type": "metric", "x": 0, "y": 14, "width": 24, "height": 6,
+            { "type": "metric", "x": 16, "y": 11, "width": 8, "height": 5,
               "properties": {
-                "title": "Playback CloudFront - requests and 5xx rate (us-east-1)",
-                "region": "us-east-1", "view": "timeSeries", "period": 300,
+                "title": "Instance network \u2014 in is ingest, out is CDN fetches",
+                "region": "${AWS::Region}", "view": "timeSeries", "stat": "Sum", "period": 300,
                 "metrics": [
-                  [ "AWS/CloudFront", "Requests", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "stat": "Sum" } ],
-                  [ "AWS/CloudFront", "5xxErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "stat": "Average", "yAxis": "right" } ] ] } }
+                  [ "AWS/EC2", "NetworkIn", "InstanceId", "${OriginInstance}", { "label": "in (encoder)" } ],
+                  [ "AWS/EC2", "NetworkOut", "InstanceId", "${OriginInstance}", { "label": "out (to CloudFront)" } ] ] } },
+
+            { "type": "text", "x": 0, "y": 16, "width": 24, "height": 1,
+              "properties": { "markdown": "### Playback CloudFront \u2014 free metrics. CloudFront only publishes to us-east-1, whatever region the origin is in." } },
+
+            { "type": "metric", "x": 0, "y": 17, "width": 8, "height": 6,
+              "properties": {
+                "title": "Requests",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Sum", "period": 300,
+                "metrics": [ [ "AWS/CloudFront", "Requests", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "viewer requests" } ] ] } },
+
+            { "type": "metric", "x": 8, "y": 17, "width": 8, "height": 6,
+              "properties": {
+                "title": "Bytes to viewers / from encoder",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Sum", "period": 300,
+                "metrics": [
+                  [ "AWS/CloudFront", "BytesDownloaded", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "downloaded by viewers" } ],
+                  [ "AWS/CloudFront", "BytesUploaded", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "uploaded" } ] ] } },
+
+            { "type": "metric", "x": 16, "y": 17, "width": 8, "height": 6,
+              "properties": {
+                "title": "Error rates \u2014 total, 4xx, 5xx",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "percent" } },
+                "metrics": [
+                  [ "AWS/CloudFront", "TotalErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "total" } ],
+                  [ "AWS/CloudFront", "4xxErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "4xx" } ],
+                  [ "AWS/CloudFront", "5xxErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "5xx" } ] ] } },
+
+            { "type": "text", "x": 0, "y": 23, "width": 24, "height": 1,
+              "properties": { "markdown": "### Playback CloudFront \u2014 additional metrics (opt-in, ~USD 2.40/month). Empty widgets mean **EnableCloudFrontAdditionalMetrics** is false." } },
+
+            { "type": "metric", "x": 0, "y": 24, "width": 8, "height": 6,
+              "properties": {
+                "title": "Cache hit rate \u2014 the number that protects the origin",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "max": 100, "label": "percent" } },
+                "metrics": [ [ "AWS/CloudFront", "CacheHitRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "hit rate %" } ] ],
+                "annotations": { "horizontal": [ { "label": "expect high once segments are cached", "value": 80, "color": "#2ca02c" } ] } } },
+
+            { "type": "metric", "x": 8, "y": 24, "width": 8, "height": 6,
+              "properties": {
+                "title": "Origin latency \u2014 high at the live edge is EXPECTED",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "ms" } },
+                "metrics": [ [ "AWS/CloudFront", "OriginLatency", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "origin first byte" } ] ] } },
+
+            { "type": "metric", "x": 16, "y": 24, "width": 8, "height": 6,
+              "properties": {
+                "title": "404 and 403 \u2014 404 spikes mean segments asked for too early, or a missing init segment",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "percent" } },
+                "metrics": [
+                  [ "AWS/CloudFront", "404ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "404" } ],
+                  [ "AWS/CloudFront", "403ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "403" } ],
+                  [ "AWS/CloudFront", "401ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "401" } ] ] } },
+
+            { "type": "metric", "x": 0, "y": 30, "width": 24, "height": 6,
+              "properties": {
+                "title": "Origin-side failures \u2014 502 bad gateway, 503 unavailable, 504 timeout. Any of these means CloudFront could not get a usable response from the origin.",
+                "region": "us-east-1", "view": "timeSeries", "stat": "Average", "period": 300,
+                "yAxis": { "left": { "min": 0, "label": "percent" } },
+                "metrics": [
+                  [ "AWS/CloudFront", "502ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "502 bad gateway" } ],
+                  [ "AWS/CloudFront", "503ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "503 unavailable" } ],
+                  [ "AWS/CloudFront", "504ErrorRate", "DistributionId", "${PlaybackDistribution}", "Region", "Global", { "label": "504 timeout" } ] ] } }
           ]
         }
-
 
 Outputs:
   InstanceId:
