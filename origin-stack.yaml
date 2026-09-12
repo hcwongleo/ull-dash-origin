@@ -4,58 +4,26 @@ Description: >-
   to the EC2 origin - no ingest CloudFront, no Lambda@Edge. Playback still goes
   through CloudFront, which is where a CDN actually earns its keep.
 
-# ---------------------------------------------------------------------------
-# WHY DIRECT INGEST
+# KEEP THIS FILE UNDER 51,200 BYTES. That is CloudFormation's limit for a template
+# passed inline, which is what "aws cloudformation deploy --template-file" does.
+# Console upload goes via S3 and allows 1 MB, but breaking the CLI path would be a
+# nasty surprise for whoever automates this. Rationale lives in docs/, not here.
 #
-#   A CDN in front of ingest buys nothing. CloudFront's value is fan-out to many
-#   readers; ingest has exactly one writer. What it costs is a hop, a TLS
-#   terminate/re-originate, and - if it coalesces the chunked body at all - part
-#   of the latency the origin exists to recover.
+# WHY DIRECT INGEST, in one paragraph
+#   A CDN's value is fan-out to many readers, and ingest has exactly one writer - so
+#   an ingest CDN adds a hop and a Lambda invocation for nothing. It also forces the
+#   security group to accept write methods from CloudFront's entire prefix list,
+#   which puts every distribution in the world inside your write perimeter. Here
+#   writes come only from EncoderCidr. The cost is that ingest is plaintext HTTP.
+#   Full reasoning, and the unresolved question of whether an ingest CDN coalesces
+#   the chunked body: docs/design-notes.md.
 #
-#   Removing it also removes the Lambda@Edge, and with it the manifest rewriting.
-#   That is a deliberate trade: see WHAT YOU GIVE UP.
-#
-# EXPECTED LATENCY GAIN - MEASURE, DO NOT ASSUME
-#
-#   Confident:    POP hop ~5-20ms, Lambda@Edge on every .mpd PUT ~5-30ms warm.
-#   Unconfirmed:  whether the ingest CloudFront coalesces 0.2s encoder fragments
-#                 into larger writes. If it does, this is worth up to ~0.5s; if
-#                 it does not, the total gain is tens of milliseconds against a
-#                 3-4s target, i.e. nothing a viewer perceives.
-#
-#   The measurement that settles it is in README.md. Run it before concluding
-#   this pipeline is better on latency; it is unambiguously better on simplicity.
-#
-# WHAT YOU GIVE UP
-#
-#   1. ServiceDescription with Latency@target. Losing it is arguably a gain: the
-#      injected 4000ms conflicted with the encoder's own
-#      suggestedPresentationDelay of PT3S, and a player given two targets hunts
-#      between them.
-#
-#      UTCTiming is NOT lost - the origin injects it on manifest ingest, so
-#      nothing has to be configured on the encoder.
-#   2. CloudFront absorbing a flood on the ingest path. Mitigated far better by
-#      EncoderCidr below, which is a much tighter control than the prefix list.
-#
-# SECURITY - READ THIS
-#
-#   Ingest is PLAINTEXT HTTP. Anyone who can reach OriginPort from an allowed
-#   source address can PUT or DELETE segments. There is no authentication in
-#   go-chunked-streaming-server.
-#
-#   EncoderCidr is therefore mandatory and has no default. Set it to the
-#   encoder's public address, ideally /32.
-#
-#   TLS on the origin is NOT offered here, deliberately. The server supports
-#   -c/-k, but a custom CloudFront origin requires a publicly trusted
-#   certificate matching its domain name, which an EC2 public DNS name cannot
-#   have. Doing it properly needs a real domain plus ACM or Let's Encrypt on the
-#   instance - worth doing, but it is a separate change and pretending a
-#   self-signed cert would work here would be wrong.
-#
-#   If the encoder is on-premises, prefer Direct Connect or a VPN over pushing
-#   plaintext across the public internet.
+# SECURITY
+#   Ingest is UNAUTHENTICATED. EncoderCidr is the only control, has no default, and
+#   0.0.0.0/0 is rejected by a Rules assertion below. If the encoder is on-premises,
+#   prefer Direct Connect or a VPN over plaintext across the public internet.
+#   TLS on the origin needs a real domain plus a publicly trusted certificate,
+#   because CloudFront rejects a self-signed certificate on a custom origin.
 # ---------------------------------------------------------------------------
 
 Metadata:
@@ -922,6 +890,75 @@ Resources:
                   echo ""
                   echo " If viewers still report problems, it is not this server."
                   echo " Check the player, or the CloudWatch dashboard for viewer errors."
+                  echo "==============================================="
+
+  # The emergency path. The NORMAL path is a stack update, which replaces the
+  # instance and therefore rolls back automatically if the new build fails - see
+  # docs/operations.md. This exists for when minutes matter, and it deliberately
+  # prints the drift warning: it changes the running instance without changing the
+  # stack, so the next instance replacement would revert unless ReleaseTag is
+  # updated too.
+  UpgradeDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${ChannelPrefix}-3-UPGRADE-to-a-new-version'
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      Content:
+        schemaVersion: '2.2'
+        description: >-
+          Installs a specific version on the running server. Only use a version you
+          have been told to use. Takes about a minute. AFTERWARDS YOU MUST RESTART
+          THE ELEMENTAL LIVE OUTPUT GROUP.
+        parameters:
+          Version:
+            type: String
+            description: 'The version you were told to install, for example v0.5.1'
+            allowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          RepoUrl:
+            type: String
+            default: !Ref RepoUrl
+            description: 'Leave this alone.'
+        mainSteps:
+          - action: aws:runShellScript
+            name: upgrade
+            inputs:
+              timeoutSeconds: '600'
+              runCommand:
+                - |
+                  set -e
+                  echo "Installing {{Version}}..."
+                  dnf install -y -q golang git >/dev/null
+                  rm -rf /opt/src
+                  git clone --depth 1 --branch "{{Version}}" "{{RepoUrl}}" /opt/src
+                  cd /opt/src
+                  SHA=$(git rev-parse --short HEAD)
+                  CGO_ENABLED=0 GOFLAGS=-mod=vendor GOPROXY=off GOCACHE=/tmp/gc HOME=/root \
+                    go build -trimpath -ldflags "-s -w -X main.gitSHA=$SHA" \
+                    -o /opt/src/go-chunked-streaming-server main.go
+                  /opt/src/deploy/install.sh
+                  sleep 4
+                  H=$(curl -s --max-time 5 http://127.0.0.1:9095/-/healthz)
+                  echo "==============================================="
+                  if [ -z "$H" ]; then
+                    echo " IT DID NOT COME BACK."
+                    echo " The previous version is still on disk. Escalate now -"
+                    echo " someone technical can put it back in one command."
+                    echo "==============================================="
+                    exit 1
+                  fi
+                  echo " {{Version}} is installed and running."
+                  echo "   $H"
+                  echo ""
+                  echo " *** NOW RESTART THE OUTPUT GROUP IN ELEMENTAL LIVE. ***"
+                  echo ""
+                  echo " Then run the document ending 1-CHECK-stream-status to confirm."
+                  echo ""
+                  echo " NOTE FOR WHOEVER MAINTAINS THIS: the CloudFormation stack still"
+                  echo " says its old version. Update the ReleaseTag parameter to"
+                  echo " {{Version}}, or a future instance replacement will silently go"
+                  echo " back to the old build."
                   echo "==============================================="
 
   RestartDocument:

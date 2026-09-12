@@ -73,28 +73,53 @@ curl -s -o /dev/null -w '%{time_starttransfer}\n' \
 ```
 **~0.1 s = working. ~2 s = not chunked.**
 
-## Upgrading
+## Getting a fix onto the server
 
-`install.sh` is the same script UserData runs, so provisioning and upgrading are
-one code path rather than two that drift.
+Every code change is published as a **version tag** like `v0.5.1`. You will be told
+which version to install. There are two ways, and the difference matters.
 
-```bash
-aws s3 cp s3://.../gcss-origin-<new-sha>.zip /tmp/r.zip
-unzip -q -o /tmp/r.zip -d /tmp/r && /tmp/r/gcss-origin-<new-sha>/install.sh
-```
+### The normal way — update the stack (recommended)
 
-It verifies checksums, keeps the previous binary at
-`bin/go-chunked-streaming-server.previous`, and restarts. Rollback is a move and
-a restart.
+CloudFormation console → your stack → **Update** → *Use current template* → change
+the **Version to deploy** parameter to the new version → **Update stack**.
 
-**Also update `ArtifactKey` in the stack**, or the next instance replacement
-boots the old version.
+Takes about 5 minutes and **replaces the server**.
 
-> **A restart requires an encoder restart.** Content lives in RAM, and Elemental
-> Live sends initialisation segments only when an output group starts. After any
-> restart, new viewers get 404 on `*init.mp4` until you restart the Elemental
-> output. Use `install.sh --no-restart` to stage a build and pick the moment.
-> This is the most important operational characteristic of this origin.
+**Why this is the recommended way:** if the new version fails to build or start,
+CloudFormation notices, gives up, and **puts the old server back automatically.** A
+broken fix cannot leave you with a broken stream. The Elastic IP moves across, so
+Elemental Live's destination does not change.
+
+### The fast way — the upgrade button (for emergencies)
+
+Systems Manager → **Run Command** → the document ending
+**`3-UPGRADE-to-a-new-version`** → type the version → **Run**.
+
+Takes about a minute. It keeps the previous version on disk, so it can be put back.
+
+**Two catches.** There is no automatic rollback — if it fails, someone technical
+has to intervene. And it changes the *server* without changing the *stack*, so the
+next time the server is replaced for any reason it will quietly go back to the old
+version. Whoever maintains this must update the stack's version parameter
+afterwards. The button prints that reminder.
+
+### Either way — afterwards
+
+1. **Restart the output group in Elemental Live.** Both methods clear the server's
+   memory, so until you do, people already watching are fine but new viewers cannot
+   start.
+2. Run **`1-CHECK-stream-status`** to confirm.
+
+### Which to use
+
+| | Stack update | Upgrade button |
+|---|---|---|
+| Time | ~5 min | ~1 min |
+| Rolls back by itself if broken | **yes** | no |
+| Stack and server stay in sync | **yes** | no — needs a follow-up |
+| Elemental restart needed after | yes | yes |
+
+Use the stack update unless the minutes matter.
 
 ## Configuration
 
