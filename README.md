@@ -27,7 +27,7 @@ One CloudFormation template. It builds the server from this repository at a pinn
 tag, so there is nothing to download, compile or upload first.
 
 1. **Download the template** —
-   [`pipelines/direct-ingest/origin-stack.yaml`](pipelines/direct-ingest/origin-stack.yaml)
+   [`origin-stack.yaml`](origin-stack.yaml)
    (open it, then use GitHub's *Download raw file* button)
 2. **AWS console → CloudFormation → Create stack → Upload a template file**
 3. **Enter your Elemental Live public IP** in the one required field
@@ -66,25 +66,19 @@ viewers get 404 on `*init.mp4` until the **encoder output is restarted**. This
 caused two outages during development. It is not yet fixed; see
 [Known gaps](#known-gaps).
 
-## The two pipelines
+## Ingest goes straight to the origin
 
-Visual comparison, with the security and latency trade-offs animated:
-**[docs/pipelines-compared.html](docs/pipelines-compared.html)** (open it locally).
+Elemental pushes directly to EC2; CloudFront sits on playback only. A CDN's value
+is fan-out to many readers, and ingest has exactly one writer — so an ingest CDN
+adds a hop and a Lambda invocation for no benefit.
 
-| | Ingest path | |
-|---|---|---|
-| `pipelines/direct-ingest/` | Elemental → EC2 | **production** — the template above |
-| `pipelines/cdn-ingest-testing/` | Elemental → CloudFront + Lambda@Edge → EC2 | testing only |
+It also decides authorisation. An ingest CDN forces the security group to accept
+write methods from CloudFront's **entire** origin-facing prefix list, which puts
+every CloudFront distribution in the world inside your write perimeter. Here
+writes are restricted to `EncoderCidr`, and the template rejects `0.0.0.0/0`.
 
-`direct-ingest` is the production path: a CDN in front of ingest buys nothing,
-because CloudFront's value is fan-out and ingest has exactly one writer. It also
-forces the security group to allow write methods from CloudFront's entire prefix
-list, meaning any distribution in the world could PUT to the origin. Direct
-ingest restricts writes to the encoder's address.
-
-The only parameter with no safe default is that address. Ingest is
-unauthenticated, so `0.0.0.0/0` would let anyone inject or delete segments in a
-live stream; the template rejects it.
+The cost is that ingest is **plaintext HTTP**. See
+[docs/design-notes.md](docs/design-notes.md).
 
 ## What was fixed
 

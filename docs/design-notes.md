@@ -1,4 +1,6 @@
-# direct-ingest — encoder straight to EC2
+# Design notes — why ingest is direct
+
+Kept out of the README so that stays a quick start.
 
 ```
 Elemental Live ──chunked PUT (plaintext, IP-restricted)──▶ EC2 origin
@@ -51,7 +53,7 @@ done
 - **Smooth ~0.2 s increments on both** → CloudFront was not coalescing, the gain
   is tens of milliseconds, and direct ingest is a simplification rather than a
   latency win.
-- **Steps of ~0.5 s on `cdn-ingest`, ~0.2 s here** → CloudFront was coalescing,
+- **Steps of ~0.5 s on the CDN-ingest variant, ~0.2 s here** → CloudFront was coalescing,
   and this pipeline is worth ~0.5 s. That is a real improvement.
 
 Do not ship a latency claim to the customer without this. The honest current

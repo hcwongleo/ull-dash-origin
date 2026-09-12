@@ -284,7 +284,7 @@ only the end-to-end test found it.
 
 ## 12. Deployment: one CloudFormation template
 
-`79f005e`, `894f569`, `264d4d3` · `pipelines/`, `deploy/`
+`79f005e`, `894f569`, `264d4d3` · `origin-stack.yaml`, `deploy/`
 
 **Upstream.** No deployment at all.
 
@@ -318,8 +318,8 @@ first boot, so there is nothing to upload, compile or look up beforehand.
   live edge), and **403/404/5xx never cached** — a segment asked for a moment
   early exists a moment later.
 
-Two pipelines: `direct-ingest` (production) and `cdn-ingest-testing`, compared in
-[pipelines-compared.html](pipelines-compared.html).
+A second pipeline with the ingest CDN and Lambda@Edge in front was built for
+measurement and is kept out of this repository, since it is not a deliverable.
 
 ---
 

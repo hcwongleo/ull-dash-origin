@@ -14,9 +14,7 @@ bin/go-chunked-streaming-server-amd64
 install.sh                               idempotent installer
 deploy/gochunked.service                 systemd unit
 deploy/cors.json
-cloudformation/direct-ingest.yaml         ← recommended for production
-cloudformation/cdn-ingest-testing.yaml    ← testing only
-cloudformation/cdn-ingest-testing-lambda.yaml
+origin-stack.yaml                        the CloudFormation template
 src/                                      full source, MIT
 CHANGES-VS-UPSTREAM.txt                   our fixes, as commits
 SHA256SUMS
@@ -25,7 +23,7 @@ SHA256SUMS
 ## Deploy
 
 See the [README](../README.md#deploy): download
-`pipelines/direct-ingest/origin-stack.yaml`, upload it in the CloudFormation
+`origin-stack.yaml`, upload it in the CloudFormation
 console, enter your Elemental Live public IP, create. About 15 minutes.
 
 The template builds the server from a pinned git tag at first boot. Dependencies
@@ -37,7 +35,7 @@ this repository — a later change upstream cannot alter what you deployed.
 ```bash
 aws cloudformation deploy --region ap-east-1 \
   --stack-name ull-origin \
-  --template-file pipelines/direct-ingest/origin-stack.yaml \
+  --template-file origin-stack.yaml \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides EncoderCidr=<elemental-public-ip>/32
 ```
