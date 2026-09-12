@@ -62,26 +62,29 @@ ABORTED=$(metric gcss_put_aborted_total)
 # graph nonsense, so it is dropped rather than translated into a fake value.
 [ "${INGEST_AGE:-}" = "-1" ] && INGEST_AGE=""
 
-DIMS="Name=InstanceId,Value=$INSTANCE_ID"
+# Built as JSON, not CLI shorthand. Shorthand for a list-of-structures dimension
+# is Dimensions=[{Name=X,Value=Y}], and the obvious-looking
+# Dimensions=Name=X,Value=Y silently mis-parses because the comma is read as a
+# field separator - which produced "put-metric-data failed" on the first deploy.
 DATA=""
 add() {
   [ -z "${2:-}" ] && return 0
-  DATA="$DATA MetricName=$1,Value=$2,Unit=$3,Dimensions=$DIMS"
+  [ -n "$DATA" ] && DATA="$DATA,"
+  DATA="$DATA{\"MetricName\":\"$1\",\"Value\":$2,\"Unit\":\"$3\",\"Dimensions\":[{\"Name\":\"InstanceId\",\"Value\":\"$INSTANCE_ID\"}]}"
 }
 
-add HeapAllocBytes      "${HEAP:-}"       Bytes
-add Goroutines          "${GOROUTINES:-}" Count
-add LastIngestAgeSeconds "${INGEST_AGE:-}" Seconds
-add FilesHeld           "${FILES:-}"      Count
-add SweptTotal          "${SWEPT:-}"      Count
-add PutAbortedTotal     "${ABORTED:-}"    Count
+add HeapAllocBytes       "${HEAP:-}"        Bytes
+add Goroutines           "${GOROUTINES:-}"  Count
+add LastIngestAgeSeconds "${INGEST_AGE:-}"  Seconds
+add FilesHeld            "${FILES:-}"       Count
+add SweptTotal           "${SWEPT:-}"       Count
+add PutAbortedTotal      "${ABORTED:-}"     Count
 
 [ -z "$DATA" ] && { log "no metrics parsed from $ADMIN, publishing nothing"; exit 0; }
 
-# shellcheck disable=SC2086
-if ! aws cloudwatch put-metric-data --region "$REGION" --namespace "$NAMESPACE" \
-       --metric-data $DATA 2>/dev/null; then
-  log "put-metric-data failed (check cloudwatch:PutMetricData on the instance role)"
+if ! err=$(aws cloudwatch put-metric-data --region "$REGION" --namespace "$NAMESPACE" \
+             --metric-data "[$DATA]" 2>&1); then
+  log "put-metric-data failed: $err"
   exit 0
 fi
 
