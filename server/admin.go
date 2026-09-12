@@ -140,6 +140,7 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 		{"gcss_last_ingest_age_seconds", "gauge", "Seconds since the last ingested byte; -1 if none yet", lastIngestAgeSeconds()},
 		{"gcss_readers_active", "gauge", "In-flight GETs streaming from memory", readersActive.Load()},
 		{"gcss_waiting_requests", "gauge", "GETs held waiting for data to arrive", waitingRequests.Load()},
+		{"gcss_swept_total", "counter", "Files reclaimed by the idle sweeper; the encoder should be deleting most segments itself", SweptTotal.Load()},
 		{"gcss_put_aborted_total", "counter", "Ingests that ended before the body completed, and were discarded", PutAbortedTotal.Load()},
 		// The two figures worth alarming on. Heap should plateau once the encoder's
 		// DELETEs balance its PUTs; goroutines should plateau at a low number.

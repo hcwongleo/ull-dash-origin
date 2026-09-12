@@ -38,6 +38,18 @@ var (
 	// A constant, so unlike a latency target it cannot fall out of step when the
 	// encoder is reconfigured - which is why this, and not ServiceDescription, is
 	// the one thing the origin rewrites.
+	// Files live in a Go map, so the garbage collector never frees them however
+	// old they are - the map entry is the reference. Elemental Live deletes its own
+	// segments as they leave the manifest window, but not the last window's worth
+	// when an output stops, and not at all if it is reconfigured or replaced.
+	//
+	// This is a garbage collector, not a DVR window. The default is 300x a typical
+	// 12s timeShiftBufferDepth precisely so it never has to be tuned against the
+	// encoder: an earlier build sized retention against that window and deleted
+	// the origin's own manifest two seconds after ingest.
+	idleSweepS  = flag.Int64("idle-sweep", 3600, "Reclaim complete, non-init files whose last write is older than this many seconds. Must comfortably exceed the MPD timeShiftBufferDepth. 0 disables, and then anything the encoder never deletes accumulates until the process restarts")
+	initPattern = flag.String("init-pattern", server.DefaultInitPattern, "Names matching this are never swept. An initialisation segment is PUT once and needed by every later viewer for the life of the stream, so it looks idle while being essential. Empty disables the exemption")
+
 	utcTimingURL = flag.String("utc-timing", "https://time.akamai.com/?iso", "URL injected as the DASH UTCTiming value on manifest ingest, using the http-iso scheme. Empty disables injection")
 )
 
@@ -63,6 +75,8 @@ func main() {
 		AdminAddr:                    *adminAddr,
 		LogLevel:                     *logLevelName,
 		UTCTiming:                    *utcTimingURL,
+		IdleSweep:                    time.Duration(*idleSweepS) * time.Second,
+		InitPattern:                  *initPattern,
 		GitSHA:                       gitSHA,
 	}))
 }

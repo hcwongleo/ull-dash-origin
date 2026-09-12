@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -22,6 +23,8 @@ type Options struct {
 	LogLevel                     string
 	GitSHA                       string
 	UTCTiming                    string
+	InitPattern                  string
+	IdleSweep                    time.Duration
 	Port                         int
 	CertFilePath                 string
 	KeyFilePath                  string
@@ -46,6 +49,17 @@ func StartHTTPServer(o Options) error {
 
 	SetLogLevel(o.LogLevel)
 	SetUTCTiming(o.UTCTiming)
+
+	if err := SetInitPattern(o.InitPattern); err != nil {
+		return fmt.Errorf("bad -init-pattern %q: %w", o.InitPattern, err)
+	}
+	if o.InitPattern == "" {
+		logWarnf("no -init-pattern: initialisation segments will be swept, and every viewer joining afterwards will fail")
+	}
+	SetIdleSweep(o.IdleSweep)
+	StartSweeper(time.Minute)
+	defer StopSweeper()
+
 	if o.UTCTiming == "" {
 		logWarnf("UTCTiming injection disabled: players will fall back to the device clock, which mis-computes the live edge")
 	} else {

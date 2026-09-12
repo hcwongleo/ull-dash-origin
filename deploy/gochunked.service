@@ -21,6 +21,12 @@ Group=gochunked
 #
 #   no -d : the encoder issues its own DELETEs for expired segments, which is what
 #           bounds memory. Measured: 27,507 DELETEs in one 5h session.
+# -idle-sweep is a garbage collector, NOT a DVR window. Files live in a Go map, so
+# nothing frees them however old they are. Elemental deletes its own segments as
+# they leave the manifest window, but not the last window's worth when an output
+# stops, and not at all if it is reconfigured or replaced. 3600s is ~300x a typical
+# 12s timeShiftBufferDepth, so it cannot reach live content.
+#
 #   no -w : holding a GET for a not-yet-present segment buys ~0.2s of latency and
 #           costs visible jitter, because the hold must be sized against
 #           availabilityTimeOffset to avoid 404ing requests the manifest invites.
@@ -32,7 +38,8 @@ ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -ingest-idle-timeout 10 \
   -admin-addr 127.0.0.1:9095 \
   -log-level warn \
-  -utc-timing https://time.akamai.com/?iso
+  -utc-timing https://time.akamai.com/?iso \
+  -idle-sweep 3600
 
 Restart=always
 RestartSec=2

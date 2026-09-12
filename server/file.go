@@ -188,6 +188,25 @@ func (f *File) Close() error {
 	return nil
 }
 
+// Discard releases a file's memory and releases anyone reading it.
+//
+// Setting eof before broadcasting is what makes this safe: a reader parked in
+// Read wakes, sees eof with nothing left to read, and returns io.EOF. Without
+// the eof it would wake, find the buffer empty and not at eof, and wait again on
+// a condition variable no writer will ever signal.
+//
+// Terminal for in-flight reads, which is correct — the bytes are gone. Callers
+// must remove the map entry BEFORE calling this, so no new reader can attach to
+// a file that is about to be emptied.
+func (f *File) Discard() {
+	f.lock.Lock()
+	f.eof = true
+	f.buffer = nil
+	f.lock.Unlock()
+
+	f.cond.Broadcast()
+}
+
 // Write Write bytes to a file
 func (f *File) Write(p []byte) (int, error) {
 	f.lock.Lock()
