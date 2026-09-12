@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ULL-DASH origin — design and architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0c0e; --p1:#12141a; --p2:#181b23; --p3:#20242e;
+  --l1:#242833; --l2:#333947;
+  --t1:#eef0f5; --t2:#9ba3b4; --t3:#5e6675;
+  --w:#4ade80;   /* writer / ingest */
+  --r:#60a5fa;   /* reader / playback */
+  --bad:#f87171;
+  --amb:#fbbf24;
+  --vio:#c084fc;
+  --mono:'Geist Mono',ui-monospace,monospace;
+  --disp:'Instrument Serif',Georgia,serif;
+  --sans:'Geist',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--t1);font-family:var(--sans);
+  font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:0 26px}
+h1{font-family:var(--disp);font-weight:400;font-size:clamp(2.4rem,6.5vw,4.4rem);
+  line-height:1.02;letter-spacing:-.02em;margin:0 0 18px}
+h1 em{font-style:italic;color:var(--w)}
+h2{font-family:var(--disp);font-weight:400;font-size:clamp(1.5rem,3vw,2.2rem);
+  letter-spacing:-.01em;margin:0 0 6px;line-height:1.1}
+h3{font-family:var(--sans);font-weight:600;font-size:1rem;margin:26px 0 8px;letter-spacing:-.01em}
+.n{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--t3);margin:0 0 16px}
+p{margin:0 0 14px;max-width:68ch;color:var(--t2)}
+p b,p strong{color:var(--t1);font-weight:600}
+code{font-family:var(--mono);font-size:.84em;background:var(--p2);border:1px solid var(--l1);
+  padding:1px 5px;border-radius:3px;color:var(--w)}
+pre{font-family:var(--mono);font-size:11.5px;line-height:1.75;background:var(--p1);
+  border:1px solid var(--l1);border-left:2px solid var(--l2);padding:14px 16px;overflow-x:auto;margin:14px 0}
+pre .c{color:var(--t3)}
+pre .k{color:var(--vio)}
+pre .g{color:var(--w)}
+pre .b{color:var(--bad)}
+header{padding:78px 0 40px}
+.lede{font-size:19.5px;max-width:56ch}
+section{padding:56px 0;border-top:1px solid var(--l1)}
+.fig{background:var(--p1);border:1px solid var(--l1);padding:22px;margin:22px 0 10px}
+.cap{font-family:var(--mono);font-size:10.5px;color:var(--t3);line-height:1.75;margin:0}
+.nav{display:flex;flex-wrap:wrap;gap:8px;margin:26px 0 0}
+.nav a{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--t2);text-decoration:none;border:1px solid var(--l2);padding:6px 11px;transition:.15s}
+.nav a:hover{color:var(--w);border-color:var(--w)}
+
+/* ── topology ── */
+.rail{display:flex;align-items:center;margin:6px 0}
+.node{flex:0 0 auto;background:var(--p2);border:1px solid var(--l2);padding:10px 12px;
+  font-family:var(--mono);font-size:9px;line-height:1.5;z-index:2;min-width:96px}
+.node b{display:block;font-size:10px;font-weight:600;margin-bottom:3px;color:var(--t1)}
+.node.enc{border-color:var(--w)}.node.enc b{color:var(--w)}
+.node.org{border-color:var(--r);background:#0f1725;min-width:150px}.node.org b{color:var(--r)}
+.node.cdn{border-color:var(--l2)}
+.wire{flex:1 1 auto;height:1px;background:var(--l2);position:relative;min-width:34px;z-index:1}
+.wire i{position:absolute;top:50%;width:5px;height:5px;margin-top:-2.5px;border-radius:50%;
+  animation:flow 2.4s linear infinite}
+.wire.w i{background:var(--w);box-shadow:0 0 7px var(--w)}
+.wire.r i{background:var(--r);box-shadow:0 0 7px var(--r)}
+.wire i:nth-child(2){animation-delay:.8s}.wire i:nth-child(3){animation-delay:1.6s}
+@keyframes flow{from{left:-3px;opacity:0}12%{opacity:1}88%{opacity:1}to{left:calc(100% - 2px);opacity:0}}
+.wlab{font-family:var(--mono);font-size:8.5px;color:var(--t3);letter-spacing:.08em;margin:2px 0 12px}
+
+/* ── read while write ── */
+.tracks{margin-top:4px}
+.trk{margin-bottom:16px}
+.trkh{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;
+  color:var(--t3);letter-spacing:.1em;margin-bottom:6px}
+.bar{height:28px;border:1px solid var(--l2);background:var(--bg);position:relative;overflow:hidden}
+.fill{position:absolute;inset:0 auto 0 0;width:0;animation:grow 5s linear infinite}
+.fill.w{background:repeating-linear-gradient(90deg,rgba(74,222,128,.5) 0 8px,rgba(74,222,128,.14) 8px 16px)}
+.fill.r{background:repeating-linear-gradient(90deg,rgba(96,165,250,.5) 0 8px,rgba(96,165,250,.14) 8px 16px);animation-delay:.35s}
+@keyframes grow{0%{width:0}76%{width:100%}100%{width:100%}}
+.head{position:absolute;top:0;bottom:0;width:2px;animation:hd 5s linear infinite}
+.head.w{background:var(--w);box-shadow:0 0 9px var(--w)}
+.head.r{background:var(--r);box-shadow:0 0 9px var(--r);animation-delay:.35s}
+@keyframes hd{0%{left:0;opacity:1}76%{left:100%;opacity:1}77%{opacity:0}100%{left:100%;opacity:0}}
+.gap{font-family:var(--mono);font-size:10.5px;color:var(--r);text-align:center;
+  padding-top:12px;border-top:1px dashed var(--l2)}
+
+/* ── the spin, animated ── */
+.spinrow{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--l1);border:1px solid var(--l1)}
+.sp{background:var(--p1);padding:18px}
+.sp h4{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 12px}
+.sp.bad h4{color:var(--bad)}.sp.ok h4{color:var(--w)}
+.loop{font-family:var(--mono);font-size:10px;line-height:2;color:var(--t2)}
+.loop .hot{color:var(--bad);animation:blink .35s steps(2) infinite}
+.loop .rest{color:var(--w)}
+@keyframes blink{0%{opacity:1}50%{opacity:.25}}
+.cpu{height:8px;background:var(--p3);margin-top:12px;position:relative;overflow:hidden}
+.cpu i{position:absolute;inset:0 auto 0 0}
+.cpu.bad i{width:100%;background:var(--bad);animation:pulse 1s ease-in-out infinite}
+.cpu.ok i{width:1%;background:var(--w)}
+@keyframes pulse{0%,100%{opacity:.65}50%{opacity:1}}
+.cpulab{font-family:var(--mono);font-size:9px;margin-top:6px}
+.sp.bad .cpulab{color:var(--bad)}.sp.ok .cpulab{color:var(--w)}
+
+/* ── lock diagram ── */
+.locks{display:flex;flex-direction:column;gap:9px}
+.lk{border:1px solid var(--l2);background:var(--p2);padding:11px 13px;font-family:var(--mono);font-size:9.5px}
+.lk b{color:var(--t1)}
+.lk.map{border-left:2px solid var(--vio)}
+.lk.file{border-left:2px solid var(--r)}
+.holders{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+.h{font-size:8px;padding:3px 6px;border:1px solid var(--l2);color:var(--t3)}
+.h.rd{border-color:var(--r);color:var(--r);animation:hold 3s ease-in-out infinite}
+.h.rd:nth-child(2){animation-delay:.3s}.h.rd:nth-child(3){animation-delay:.6s}
+.h.wr{border-color:var(--w);color:var(--w);animation:hold 3s ease-in-out infinite;animation-delay:1.5s}
+@keyframes hold{0%,100%{background:transparent}50%{background:rgba(255,255,255,.06)}}
+
+/* ── wake table ── */
+.wake{display:grid;gap:1px;background:var(--l1);border:1px solid var(--l1)}
+.wk{display:grid;grid-template-columns:180px 1fr;gap:14px;background:var(--p1);padding:11px 14px;
+  font-family:var(--mono);font-size:9.5px;align-items:center}
+.wk .ev{color:var(--amb)}
+.wk .me{color:var(--t2)}
+.wk.crit .ev{color:var(--bad)}
+
+/* ── memory bounds ── */
+.bounds{display:flex;flex-direction:column;gap:11px}
+.bd{position:relative;height:30px;border:1px solid var(--l2);background:var(--bg);overflow:hidden}
+.bd i{position:absolute;inset:0 auto 0 0;font-family:var(--mono);font-size:9px;
+  display:flex;align-items:center;padding-left:9px;white-space:nowrap;color:#0b0c0e;font-weight:600}
+.bd .b1{width:2%;background:var(--w)}
+.bd .b2{width:14%;background:var(--r)}
+.bd .b3{width:100%;background:var(--p3);color:var(--t2)}
+.bdl{font-family:var(--mono);font-size:9px;color:var(--t3);margin-top:-6px}
+
+table{width:100%;border-collapse:collapse;margin:16px 0 6px;font-size:13.5px}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--l1);vertical-align:top}
+thead th{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--t3);border-bottom:1px solid var(--l2)}
+tbody th{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--t1);width:34%}
+td.g{color:var(--w)}td.b{color:var(--bad)}
+.note{border-left:2px solid var(--amb);background:rgba(251,191,36,.06);padding:14px 16px;margin:18px 0}
+.note p:last-child{margin-bottom:0}
+.note.bad{border-left-color:var(--bad);background:rgba(248,113,113,.06)}
+footer{border-top:1px solid var(--l1);padding:26px 0 60px;font-family:var(--mono);font-size:10px;
+  color:var(--t3);line-height:1.9}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important}.fill{width:100%}.wire i{opacity:.5}
+}
+@media(max-width:820px){
+  .spinrow{grid-template-columns:1fr}.rail{flex-wrap:wrap;gap:6px}
+  .wire{min-width:100%}.node{flex:1 1 130px}.wk{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <p class="n">ULL-DASH origin &middot; v0.6.0 &middot; design and architecture</p>
+  <h1>Serving a segment<br>that hasn&rsquo;t <em>finished<br>arriving</em> yet.</h1>
+  <p class="lede">One idea makes ~4&nbsp;second live latency possible. Everything else here exists to make that idea survive contact with production.</p>
+  <div class="nav">
+    <a href="#why">01 The idea</a>
+    <a href="#arch">02 Architecture</a>
+    <a href="#read">03 The read path</a>
+    <a href="#locks">04 Locking</a>
+    <a href="#wake">05 Waking readers</a>
+    <a href="#mem">06 Memory</a>
+    <a href="#restart">07 Restarts</a>
+    <a href="#num">08 Numbers</a>
+  </div>
+</header>
+
+<!-- 01 ───────────────────── -->
+<section id="why">
+  <p class="n">01 &middot; the idea</p>
+  <h2>The reader chases the writer</h2>
+  <p>A normal origin hands out whole files, which puts a floor under latency: nothing can be served until a segment is complete. Here the encoder&rsquo;s upload and the viewer&rsquo;s download run <b>at the same time</b>, a fraction of a second apart.</p>
+
+  <div class="fig">
+    <div class="tracks">
+      <div class="trk">
+        <div class="trkh"><span>ENCODER WRITING SEGMENT 417</span><span>~700 KB over 2.0 s</span></div>
+        <div class="bar"><div class="fill w"></div><div class="head w"></div></div>
+      </div>
+      <div class="trk">
+        <div class="trkh"><span>VIEWER READING SEGMENT 417</span><span>starts ~130 ms behind</span></div>
+        <div class="bar"><div class="fill r"></div><div class="head r"></div></div>
+      </div>
+      <p class="gap">the distance between the two heads <b>is</b> your latency</p>
+    </div>
+  </div>
+  <p class="cap">Measured through a real CloudFront distribution: a 426 KB segment delivered progressively over <b>1700 ms</b> while still being written. A buffering origin would have sent nothing for 2 s and then dumped it.</p>
+
+  <div class="note bad">
+    <p><b>This is exactly what S3 cannot do.</b> S3 makes an object readable only once the PUT completes. That is why the S3 pipeline&rsquo;s Lambda rewrites <code>availabilityTimeOffset</code> to 0 &mdash; the encoder&rsquo;s &ldquo;fetchable 1.8&nbsp;s early&rdquo; is simply untrue there. And in ap-east-1 there is no managed alternative: MediaPackage has no endpoint in the region, MediaStore is discontinued.</p>
+  </div>
+</section>
+
+<!-- 02 ───────────────────── -->
+<section id="arch">
+  <p class="n">02 &middot; architecture</p>
+  <h2>One stack, one region, 29 resources</h2>
+
+  <div class="fig">
+    <div class="rail">
+      <div class="node enc"><b>Elemental Live</b>2 s segments<br>~0.2 s chunks</div>
+      <div class="wire w"><i></i><i></i><i></i></div>
+      <div class="node org"><b>EC2 origin</b>read-while-write<br>all content in RAM<br>:9094 content &middot; :9095 admin</div>
+      <div class="wire r"><i></i><i></i><i></i></div>
+      <div class="node cdn"><b>CloudFront</b>playback only<br>segments 6 h<br>manifest 1 s</div>
+      <div class="wire r"><i></i><i></i><i></i></div>
+      <div class="node"><b>players</b></div>
+    </div>
+    <p class="wlab">&larr;&nbsp; plaintext HTTP, one IP allowed &nbsp;&middot;&nbsp; write &nbsp;|&nbsp; read &nbsp;&middot;&nbsp; HTTPS, prefix-list restricted, GET/HEAD/OPTIONS only &nbsp;&rarr;</p>
+  </div>
+
+  <h3>Why there is no CDN in front of ingest</h3>
+  <p>A CDN&rsquo;s value is fan-out to many readers. <b>Ingest has exactly one writer.</b> So an ingest CDN adds a hop and a Lambda invocation for no fan-out benefit.</p>
+  <p>The stronger argument is authorisation. With CloudFront in front of ingest, the security group must accept <code>PUT</code> and <code>DELETE</code> from CloudFront&rsquo;s <b>entire origin-facing prefix list</b> &mdash; that is the only source address CloudFront presents. Every CloudFront distribution in the world would be inside your write perimeter.</p>
+
+  <table>
+    <thead><tr><th>Path</th><th>Cached</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><th>*.mpd</th><td class="g">1 s</td><td>at or below the encoder&rsquo;s <code>minimumUpdatePeriod</code>; a stale manifest moves the player&rsquo;s live edge</td></tr>
+      <tr><th>segments</th><td class="g">6 h</td><td>immutable once written &mdash; safe <i>only</i> because names carry a per-run token</td></tr>
+      <tr><th>404</th><td class="g">1 s</td><td>ULL players ask early because the manifest invites it, and they do it in sync. Uncached that is one origin hit per viewer, per segment boundary</td></tr>
+      <tr><th>403, 5xx</th><td class="b">never</td><td>a segment asked for a moment early exists a moment later</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 03 ───────────────────── -->
+<section id="read">
+  <p class="n">03 &middot; the read path &mdash; the load-bearing fix</p>
+  <h2>Four bytes of code that cost a CPU core per viewer</h2>
+  <p>When a reader drained everything written so far but the writer had not finished, upstream returned <code>(0, nil)</code>. Go&rsquo;s <code>io.Copy</code> reads that as <b>retry immediately</b>, with no backoff.</p>
+
+  <div class="fig">
+    <div class="spinrow">
+      <div class="sp bad">
+        <h4>upstream</h4>
+        <pre><span class="c">// reader caught the writer</span>
+<span class="b">return 0, nil</span></pre>
+        <div class="loop">
+          <span class="hot">read &rarr; 0 bytes &rarr; retry &rarr;</span><br>
+          <span class="hot">read &rarr; 0 bytes &rarr; retry &rarr;</span><br>
+          <span class="hot">read &rarr; 0 bytes &rarr; retry &rarr;</span>
+        </div>
+        <div class="cpu bad"><i></i></div>
+        <p class="cpulab">1.07 cores &mdash; per viewer, forever</p>
+      </div>
+      <div class="sp ok">
+        <h4>now</h4>
+        <pre><span class="k">for</span> drained &amp;&amp; !eof {
+  <span class="k">if</span> ctx.Err() != <span class="k">nil</span> { <span class="k">return</span> }
+  cond.<span class="g">Wait</span>()
+}</pre>
+        <div class="loop">
+          <span class="rest">read &rarr; sleep on cond &rarr;</span><br>
+          <span class="rest">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8627; woken by Write</span><br>
+          <span class="rest">read &rarr; bytes &rarr; copy</span>
+        </div>
+        <div class="cpu ok"><i></i></div>
+        <p class="cpulab">0.0036 cores &mdash; measured, live stream</p>
+      </div>
+    </div>
+  </div>
+  <p class="cap">A profiler put <b>87.67%</b> of all server CPU inside that one function. Worse: a spinning reader never attempts a <i>write</i>, so it never discovers the viewer disconnected &mdash; it span <b>forever</b>. Four disconnected readers left an origin burning 2.43 cores permanently with two ingests wedged.</p>
+
+  <div class="note">
+    <p><b>Why the condition variable is built on <code>lock.RLocker()</code>.</b> Every waiter is a reader holding <code>RLock</code>. <code>Wait</code> enqueues on the notify list <i>before</i> unlocking, and a writer cannot append while any reader holds <code>RLock</code> &mdash; so a <code>Broadcast</code> issued after the write lock is released can never be missed. That is the entire correctness argument for the read path.</p>
+  </div>
+</section>
+
+<!-- 04 ───────────────────── -->
+<section id="locks">
+  <p class="n">04 &middot; locking</p>
+  <h2>Two levels, so one file never blocks another</h2>
+
+  <div class="fig">
+    <pre><span class="k">var</span> Files    = <span class="k">map</span>[<span class="k">string</span>]*File{}   <span class="c">// keyed by request URL, verbatim</span>
+<span class="k">var</span> FilesLock = <span class="k">new</span>(sync.RWMutex)      <span class="c">// guards the MAP</span>
+
+<span class="k">type</span> File <span class="k">struct</span> {
+    lock   *sync.RWMutex   <span class="c">// guards THIS file's bytes</span>
+    cond   *sync.Cond      <span class="c">// built on lock.RLocker()</span>
+    buffer []<span class="k">byte</span>         <span class="c">// the whole object, in memory</span>
+    eof    <span class="k">bool</span>           <span class="c">// the writer has finished</span>
+}</pre>
+    <div class="locks">
+      <div class="lk map"><b>FilesLock</b> &mdash; only for map lookup, insert and delete. Held for microseconds.
+        <div class="holders"><span class="h">GET lookup</span><span class="h">PUT insert</span><span class="h">DELETE</span><span class="h">sweep</span></div>
+      </div>
+      <div class="lk file"><b>File.lock</b> &mdash; held while streaming bytes. Many readers, one writer.
+        <div class="holders"><span class="h rd">reader RLock</span><span class="h rd">reader RLock</span><span class="h rd">reader RLock</span><span class="h wr">writer Lock</span></div>
+      </div>
+    </div>
+  </div>
+  <p class="cap">A reader holds only the <i>file&rsquo;s</i> read lock while streaming, so ingest of every other segment continues untouched. This is why one slow viewer cannot stall the encoder.</p>
+
+  <div class="note bad">
+    <p><b>A map entry is a strong reference.</b> Go&rsquo;s collector frees what is <i>unreachable</i>, not what is <i>unused</i> &mdash; so nothing here is ever reclaimed by the runtime. Verified: four test objects still resident after <b>18.9 hours</b>, including across a forced GC. Everything in &sect;06 exists because of that single fact.</p>
+  </div>
+</section>
+
+<!-- 05 ───────────────────── -->
+<section id="wake">
+  <p class="n">05 &middot; waking readers</p>
+  <h2>Four things must wake a parked reader</h2>
+  <p>A reader asleep on the condition variable is invisible to <code>net/http</code>. Miss any of these and it waits on a signal nobody will ever send.</p>
+
+  <div class="fig">
+    <div class="wake">
+      <div class="wk"><span class="ev">bytes arrive</span><span class="me">Write appends, then Broadcast</span></div>
+      <div class="wk"><span class="ev">writer finishes</span><span class="me">Close sets eof, then Broadcast &rarr; reader returns io.EOF</span></div>
+      <div class="wk crit"><span class="ev">viewer disconnects</span><span class="me">context.AfterFunc(ctx, Broadcast); Read re-checks ctx.Err() on every wake</span></div>
+      <div class="wk crit"><span class="ev">file reclaimed</span><span class="me">Discard sets eof, nils the buffer, Broadcast &rarr; terminal, which is correct: the bytes are gone</span></div>
+    </div>
+  </div>
+  <p class="cap">The two in red were real bugs. Without the first, a disconnected viewer&rsquo;s goroutine spun forever. Without the second, a reader parked on a file the sweeper reclaimed waited on a condition variable no writer would signal again.</p>
+
+  <h3>One goroutine per request</h3>
+  <p><code>net/http</code> runs one goroutine per request, so the count <b>is</b> the number of requests in flight. Measured on the deployed origin:</p>
+  <div class="fig">
+    <pre>idle                 <span class="g">5</span>
+20 slow readers     <span class="g">25</span>   <span class="c">// exactly +20</span>
+80 slow readers     <span class="g">85</span>   <span class="c">// exactly +80</span>
+after they finish    <span class="g">5</span>   <span class="c">// back to baseline &mdash; the healthy signal</span></pre>
+  </div>
+  <p class="cap">A count that ratchets up and never falls means requests are stuck &mdash; the shape every leak in this server has had. Hence the dashboard metric and the alarm.</p>
+
+  <h3>The bug that produced no error at all</h3>
+  <p><code>FileReadCloser</code> embeds <code>*File</code>, so <code>rc.Close()</code> resolved to the promoted <code>File.Close</code> &mdash; which sets <code>eof</code>. <b>One viewer closing its connection marked the segment complete for every other viewer</b>, silently truncating a segment still being ingested. An explicit shadowing method now fixes it. Nothing logged; it just corrupted playback.</p>
+</section>
+
+<!-- 06 ───────────────────── -->
+<section id="mem">
+  <p class="n">06 &middot; memory</p>
+  <h2>Bounded three independent ways</h2>
+
+  <div class="fig">
+    <div class="bounds">
+      <div class="bd"><i class="b1">encoder DELETEs &mdash; ~25 MB steady state</i></div>
+      <p class="bdl">1 &nbsp;Elemental deletes each segment as it leaves the manifest window. 27,507 measured in one 5 h session. Does all the work in normal operation.</p>
+
+      <div class="bd"><i class="b2">-idle-sweep 3600 &mdash; ~1.9 GB worst case</i></div>
+      <p class="bdl">2 &nbsp;A garbage collector, not a DVR window. Covers what the encoder does not: an output that stops leaves its last window undeleted, and DELETEs stopping altogether would grow at ~1.8 GB/hour. 300&times; a 12 s timeShiftBufferDepth, so it cannot reach live content.</p>
+
+      <div class="bd"><i class="b3">MemoryMax=25% &mdash; the cgroup ceiling</i></div>
+      <p class="bdl">3 &nbsp;A kernel limit, so a runaway dies inside its own cgroup rather than letting the system OOM killer choose sshd or the SSM agent instead.</p>
+    </div>
+  </div>
+
+  <h3>The sweeper&rsquo;s three phases</h3>
+  <div class="fig">
+    <pre>1  collect under <span class="g">RLock</span>          <span class="c">// cheap, does not block ingest</span>
+2  delete under <span class="g">Lock</span>, <span class="b">re-checking identity</span>
+                                <span class="c">// a PUT between phases must not lose its replacement</span>
+3  <span class="g">Discard</span> outside FilesLock   <span class="c">// wake parked readers, without holding the global lock</span></pre>
+  </div>
+  <p class="cap">Each phase guards a bug this server has actually had. Cost measured at <b>5.1&nbsp;&micro;s per sweep</b> at ~100 files, once a minute &mdash; roughly 400,000&times; smaller than the CPU the origin uses just serving.</p>
+
+  <div class="note">
+    <p><b>Why there is no hand-maintained byte counter.</b> An earlier build incremented on write and decremented on release, missed the decrement on one route, and drifted to <b>60&times; the true value</b> in production &mdash; 6.1 GB reported against 81 MB actual. Worse than no metric, because it looked authoritative. Memory now comes from <code>runtime.ReadMemStats</code>, which cannot drift.</p>
+  </div>
+</section>
+
+<!-- 07 ───────────────────── -->
+<section id="restart">
+  <p class="n">07 &middot; restarts</p>
+  <h2>The one file that must survive</h2>
+  <p>Everything is in RAM, and <b>Elemental Live sends initialisation segments only when an output group starts.</b> So every restart lost them and no encoder resent them. Viewers already watching kept playing; only <b>new</b> viewers failed &mdash; which is why it looked healthy for hours. It caused two outages.</p>
+  <p>It also undid every automatic recovery: systemd restarts a crash in ~2 s, the watchdog catches a hang within a minute, AWS recovers a failed host unasked &mdash; and all three handed back a stream that would not accept new viewers.</p>
+
+  <div class="fig">
+    <pre><span class="c">// init segments only: a few hundred bytes, once per encoder run.</span>
+<span class="c">// media stays in RAM &mdash; a disk write per segment would buy nothing.</span>
+
+PUT /ch18live-v_init.mp4   &rarr;   <span class="g">%2Fch18live-v_init.mp4</span>   <span class="c">// percent-encoded, flat</span>
+
+<span class="b">filepath.Join("/opt/gochunked/content", "/../../etc/cron.d/x")</span>
+                        <span class="b">&rarr; "/etc/cron.d/x"</span>   <span class="c">// what we are defending against</span></pre>
+    <p class="cap" style="margin-top:12px">The filename comes from an <b>unauthenticated request URL</b>, and this is the only code in the server that turns a request into a filesystem path. So: percent-encoded to one flat name with no separators, never exactly <code>.</code> or <code>..</code>, and the resolved path re-checked inside the directory anyway. <code>ProtectSystem=strict</code> would block it today &mdash; but that lives in the unit file, not the program.</p>
+  </div>
+
+  <table>
+    <thead><tr><th>Event</th><th>Before</th><th>Now</th></tr></thead>
+    <tbody>
+      <tr><th>crash &rarr; systemd, ~2 s</th><td class="b">new viewers fail until encoder restart</td><td class="g">self-heals</td></tr>
+      <tr><th>hang &rarr; watchdog, ~1 min</th><td class="b">same</td><td class="g">self-heals</td></tr>
+      <tr><th>AWS host event &rarr; auto-recovery</th><td class="b">same</td><td class="g">self-heals</td></tr>
+      <tr><th>binary upgrade</th><td class="b">same</td><td class="g">self-heals</td></tr>
+    </tbody>
+  </table>
+  <p class="cap">Verified on the live instance: <code>SIGKILL</code>, systemd restart, init segment served <b>200 and byte-identical</b>, media segment correctly 404 because the encoder replaces it within seconds.</p>
+</section>
+
+<!-- 08 ───────────────────── -->
+<section id="num">
+  <p class="n">08 &middot; numbers</p>
+  <h2>Everything measured, nothing estimated</h2>
+  <table>
+    <thead><tr><th></th><th>Upstream</th><th>Now</th></tr></thead>
+    <tbody>
+      <tr><th>CPU, live stream idle</th><td class="b">1.07 cores</td><td class="g">0.0036</td></tr>
+      <tr><th>12 readers at the live edge</th><td class="b">~12 cores</td><td class="g">0.014 cores</td></tr>
+      <tr><th>disconnect all 12</th><td class="b">never recovers</td><td class="g">0.0025, goroutines 29&rarr;5</td></tr>
+      <tr><th>RSS</th><td class="b">1.19 GB</td><td class="g">24.6 MB</td></tr>
+      <tr><th>25 half-open ingests</th><td class="b">25 fds, permanently</td><td class="g">reclaimed in 10 s</td></tr>
+      <tr><th>wedged ingests</th><td class="b">2</td><td class="g">0</td></tr>
+      <tr><th>init segment after SIGKILL</th><td class="b">404</td><td class="g">200, byte-identical</td></tr>
+      <tr><th>sweep cost</th><td>&mdash;</td><td class="g">5.1 &micro;s / minute</td></tr>
+      <tr><th>tests</th><td class="b">0</td><td class="g">39, race-clean</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note bad">
+    <p><b>What none of this shows.</b> Every figure comes from hours against one live encoder, not weeks under load. Two defects in this project were found <i>only</i> by leaving it running &mdash; a per-manifest accounting drift, and readers parked on reclaimed files. Neither was visible to the test suite or a short benchmark. <b>39 race-clean tests are necessary and not sufficient.</b></p>
+  </div>
+</section>
+
+<footer>
+  Upstream: mjneil/go-chunked-streaming-server@fa4b736, MIT &middot; 28 commits on top &middot; 39 tests, race-clean.<br>
+  Full written design: docs/design.md &middot; deploy and troubleshooting: docs/operations.md<br>
+  Open: no HA, no ingest authentication, plaintext ingest, and not yet soaked.
+</footer>
+
+</div>
+</body>
+</html>
