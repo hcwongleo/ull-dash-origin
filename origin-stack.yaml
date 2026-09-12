@@ -127,7 +127,7 @@ Parameters:
 
   ReleaseTag:
     Type: String
-    Default: v0.4.1
+    Default: v0.5.0
     Description: >-
       Git tag to build. Pinned, so a redeploy always produces the same binary.
       The instance clones this tag and compiles it at first boot - dependencies
