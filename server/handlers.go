@@ -107,6 +107,21 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 	Files[name] = f
 	FilesLock.Unlock()
 
+	// Release anyone parked on this segment NOW, while it is still empty, rather
+	// than after the ingest finishes. The file exists and is registered, so a woken
+	// reader takes the ordinary read-while-write path: it blocks on the file's
+	// condition variable and follows the writer chunk by chunk.
+	//
+	// Signalling only after io.Copy - which is what this did until measurement
+	// caught it - meant an early GET waited for the WHOLE segment and then received
+	// it in one burst: 2.3s of dead air against a 2s segment, and read-while-write
+	// switched off for precisely the requests the manifest's availabilityTimeOffset
+	// invited. -wait-timeout-ms is documented as a ceiling that adds no latency,
+	// and this is what makes that true.
+	if waitingRequests != nil {
+		waitingRequests.ReceivedDataFor(name)
+	}
+
 	// Start writing to file without holding lock so that GET requests can read from it.
 	// The body carries an idle deadline so a half-open connection cannot pin this
 	// goroutine and its socket forever.
@@ -170,7 +185,10 @@ func PostHandler(waitingRequests *WaitingRequests, onlyRAM bool, cors *Cors, bas
 	addCors(w, cors)
 	w.WriteHeader(http.StatusNoContent)
 
-	// Awake GET requests waiting (if there are any)
+	// Fallback only. Waiters are normally released above, the instant the file is
+	// registered. This catches the narrow case where the file was dropped from Files
+	// mid-ingest - an expiry sweep - and a fresh GET parked afterwards; it wakes to
+	// find nothing and returns 404, which is correct.
 	if waitingRequests != nil {
 		waitingRequests.ReceivedDataFor(name)
 	}
