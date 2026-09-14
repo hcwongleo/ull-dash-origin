@@ -27,28 +27,28 @@ Group=gochunked
 # stops, and not at all if it is reconfigured or replaced. 3600s is ~300x a typical
 # 12s timeShiftBufferDepth, so it cannot reach live content.
 #
-# -w holds a GET for a segment that has not arrived yet, instead of returning 404.
+# -w IS DELIBERATELY NOT PASSED. Read this before adding it back.
 #
-# It was previously OFF because it had been sized WRONG, not because it is wrong:
-# -wait-timeout-ms was 1000 while waiters were released only when the PUT finished,
-# so a hold had to outlast a whole segment. A player accepting the manifest's
-# availabilityTimeOffset="1.800" invitation was stalled for 1.2s and then refused,
-# and every retry moved its position - the fluctuating live latency.
+# -w holds a GET for a segment that has not arrived yet instead of returning 404.
+# The idea is sound - the manifest's availabilityTimeOffset="1.800" invites players
+# to ask that early, and the encoder is measurably 360-540ms behind that invitation -
+# but the implementation in server/waiting_requests.go DEADLOCKS. It sends on an
+# unbuffered channel while holding the registry lock, and a waiter that has already
+# been signalled is no longer receiving, so the send blocks forever holding the lock.
+# On 2026-09-14 that wedged the origin: GETs hung indefinitely, goroutines climbed
+# without draining, and because the PUT path also takes that lock, the ENCODER could
+# not ingest. The channel went dark until -w was removed.
 #
-# Waiters are now released on the FIRST CHUNK, so the hold only has to outlast the
-# wait for that chunk: 360-540ms measured on this origin. 1000ms gives that room
-# with margin, and stays SHORTER THAN ONE SEGMENT, which matters more. With a
-# stalled encoder every arriving request is held to the ceiling, so a ceiling above
-# the 2s segment interval makes held requests pile up faster than they drain. The
-# previous 2500ms had exactly that property.
+# It is off rather than fixed because the benefit is unproven and the cost is not.
+# The cdn-ingest pipeline has never had -w, it answers early requests with 404, and
+# it is the pipeline that has been observed as the more stable of the two. Turning
+# 404s into holds also means an encoder stall parks every viewer's request instead of
+# refusing it cheaply, which is strictly worse for a single-instance origin.
 #
-# Holding rather than 404ing is still the right default at scale: live requests are
-# synchronised because every viewer wants the same segment at the same instant, so
-# refusing them turns each segment boundary into a burst of origin hits.
-#
-# The cost is that a held request occupies a goroutine and a connection for up to
-# 1s. That is why the goroutine alarm is set high, and why the instance is sized
-# for concurrency rather than for memory.
+# Before re-enabling: rebuild the waiting room so signalling cannot block - a channel
+# per name that is CLOSED rather than sent to - add a test that reproduces the
+# deadlock with a concurrent PUT and expiring waiters, and verify with the encoder
+# STOPPED, which is the condition that exposed it. See docs/design.md.
 ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -r \
   -i 9094 \
@@ -58,9 +58,7 @@ ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -admin-addr 127.0.0.1:9095 \
   -log-level warn \
   -utc-timing https://time.akamai.com/?iso \
-  -idle-sweep 3600 \
-  -w \
-  -wait-timeout-ms 1000
+  -idle-sweep 3600
 
 Restart=always
 RestartSec=2

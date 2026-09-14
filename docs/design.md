@@ -86,7 +86,7 @@ either way.**
 |---|---|---|
 | `*.mpd` | 1 s | At or below the encoder's `minimumUpdatePeriod`. A stale manifest moves the player's idea of the live edge |
 | segments | 6 h | Immutable once written. **Safe only because segment names carry a per-run token** — recycled names would serve stale video |
-| 404 | 0 | Standard for a live edge, and specifically right with `-w`: an early request is held and served, so a 404 means the hold already expired. Caching it then delays a segment that may already exist — up to 1 s on top of the hold, against a measured ~1.2 s margin |
+| 404 | 0 | Standard for a live edge. With `-w` off, a 404 is the normal answer to a request that arrived before the encoder wrote the segment, and the player retries. Caching it would delay a segment that exists moments later — up to 1 s against a measured ~1.2 s margin |
 | 403, 5xx | 0 | Never cache a negative at the live edge |
 
 ---
@@ -229,10 +229,35 @@ A timed-out ingest leaves a **truncated** segment, so it is deleted from the map
 returns `400` rather than being served as if complete. A `404` the encoder retries;
 bad bytes it does not.
 
-### Holding early requests instead of refusing them
+### Holding early requests instead of refusing them — DISABLED, and why
+
+**`-w` is not passed. The waiting room deadlocks.** It sends on an unbuffered channel
+while holding the registry lock, and a waiter that has already been signalled is no
+longer receiving, so that send blocks forever *holding the lock*. On 2026-09-14 this
+wedged the origin: GETs hung indefinitely, goroutines climbed without draining, and
+because the PUT path takes the same lock the **encoder could not ingest**. The channel
+was dark until `-w` was removed. Everything below describes the intended design, which
+is still sound; the implementation is not.
+
+It is off rather than fixed because the benefit is unproven and the cost is not. The
+cdn-ingest pipeline has never had `-w` — it answers early requests with 404 — and it is
+the pipeline that has been observed as the more stable of the two. Holding also makes
+an encoder stall park every viewer's request rather than refuse it cheaply, which is
+strictly worse for a single-instance origin.
+
+**To re-enable:** rebuild the mechanism so signalling cannot block — one channel per
+segment name, `close()`d rather than sent to, each waiter timing itself out and
+honouring `ctx.Done()` so a disconnected viewer's request exits immediately. Add a test
+that reproduces the deadlock with a concurrent PUT and expiring waiters, and verify with
+the encoder **stopped**, which is the condition that exposed it and which the original
+testing never covered.
 
 The manifest advertises `availabilityTimeOffset="1.800"` — an invitation to request a
-segment 1.8 s early. With `-w`, such a request is held until the data arrives.
+segment 1.8 s early. With `-w`, such a request is held until the data arrives. Note the
+encoder does not actually meet that invitation: measured holds were 360–540 ms, so the
+data is routinely late relative to what the manifest promises. That is why the too-early
+case cannot be tuned away by lowering `availabilityTimeOffset`; it can only be made
+rarer.
 
 **The hold must exceed what the manifest invites.** Upstream hardcoded 1000 ms.
 Against 1.8 s that stalled players for ~1.2 s and then refused them, and every retry
@@ -454,7 +479,7 @@ production.
 -i 9094                     content port
 -o cors.json                CORS policy
 -p content                  content path
--w                          hold a GET for a not-yet-arrived segment
+(-w deliberately NOT passed    hold a GET for a not-yet-arrived segment; deadlocks, see above)
 -wait-timeout-ms 1000       the hold ceiling; must stay under one segment
 -ingest-idle-timeout 10     abort an ingest silent this long
 -idle-sweep 3600            reclaim complete non-init files idle this long
@@ -515,10 +540,11 @@ Measured on the deployed origin with a live stream: **0.0036 cores, 24.6 MB RSS,
 ~1 MB/s of unique content.**
 
 `c8g.4xlarge` (16 vCPU / 32 GB) is therefore ~2000× the measured CPU. It is sized for
-**concurrency, not memory**: with `-w`, a held request occupies a goroutine and a
-connection for up to 2.5 s, and at 100k viewers with ~10% early at any instant that is
-~15,000 concurrent held requests — about 3.5 cores by measurement (2000 readers =
-0.39 cores). Memory cannot be the constraint: `MemoryMax` is 25% and steady state is
+**concurrency, not memory**. That sizing was done for `-w`, where a held request
+occupies a goroutine and a connection: at 100k viewers with ~10% early at any instant,
+~15,000 concurrent held requests, about 3.5 cores by measurement (2000 readers = 0.39
+cores). With `-w` off nothing is held, so this is now generous headroom rather than a
+requirement. Memory cannot be the constraint: `MemoryMax` is 25% and steady state is
 25 MB.
 
 **Origin load does not scale with audience.** Segments cache 6 h at the edge with

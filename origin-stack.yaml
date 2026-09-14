@@ -73,13 +73,11 @@ Parameters:
       Graviton4, 16 vCPU / 32 GB. Sized for CONCURRENCY, not memory: memory is
       capped at 25% by the unit file and steady state is ~25MB.
 
-      The load that scales with audience is held requests. -w holds a GET for a
-      not-yet-arrived segment for up to 1s, and live requests are synchronised
-      because every viewer wants the same segment at the same instant. At 100k
-      viewers with ~10% early at any moment that is roughly 15,000 concurrent held
-      requests, about 3.5 cores by measurement (2000 readers = 0.39 cores), sized at the
-      old 2.5s hold so now conservative. 16 vCPU
-      is ~4x that. Note the 100k figure is extrapolated, not tested.
+      Sized for held requests under -w: 100k viewers with ~10% early at any moment is
+      roughly 15,000 concurrent held requests, about 3.5 cores by measurement (2000
+      readers = 0.39 cores), and 16 vCPU is ~4x that. -w is now OFF (it deadlocks; see
+      deploy/gochunked.service), so nothing is held and this is spare headroom rather
+      than a requirement. The 100k figure is extrapolated, not tested.
 
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -492,10 +490,9 @@ Resources:
           # for a moment early exists a moment later.
           - ErrorCode: 403
             ErrorCachingMinTTL: 0
-          # 404 included. With -w an early request is HELD and then served, so a 404
-          # means the hold already timed out - the encoder is late. Caching that would
-          # delay a segment that may exist by then, on top of the hold: up to 1s more
-          # against a measured ~1.2s margin, turning a hiccup into a certain stall.
+          # 404 included. With -w off, a 404 is the normal answer to a request that beat
+          # the encoder, and the player retries. Caching it would delay a segment that
+          # exists moments later - up to 1s against a measured ~1.2s margin.
           - ErrorCode: 404
             ErrorCachingMinTTL: 0
           - ErrorCode: 500
@@ -606,8 +603,9 @@ Resources:
       Statistic: Average
       Period: 300
       EvaluationPeriods: 3
-      # High because -w is enabled: a held request legitimately occupies a goroutine
-      # for up to 1s, so at scale tens of thousands are normal rather than a leak.
+      # High because it was set for -w, where a held request legitimately occupies a
+      # goroutine. With -w off nothing is held, so this is now very slack - but a climb
+      # here is still the shape every leak in this server has had.
       # This is watching for a ratchet that never comes down, not for load.
       Threshold: 30000
       ComparisonOperator: GreaterThanThreshold
