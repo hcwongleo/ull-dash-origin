@@ -370,6 +370,10 @@ Resources:
             Encrypted: true
             DeleteOnTermination: true
       Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin' }]
+      # Changing ReleaseTag on a live stack does NOT upgrade the server: UserData is
+      # not create-only here, so CloudFormation rewrites it in place and reboots, and
+      # cloud-init runs user data once per instance. Use 3-UPGRADE-to-a-new-version,
+      # then set this to match. What was measured: docs/operations.md.
       # CreationPolicy so the stack does not report CREATE_COMPLETE while the
       # compile is still running. Without it an operator sees success and points
       # an encoder at an origin that is not listening yet.
@@ -826,6 +830,9 @@ Resources:
     Properties:
       Name: !Sub '${ChannelPrefix}-1-CHECK-stream-status'
       DocumentType: Command
+      # Needed on all three documents: Name is create-only, so editing Content with
+      # the default (Replace) fails the stack update. NewVersion versions instead.
+      UpdateMethod: NewVersion
       DocumentFormat: YAML
       TargetType: /AWS::EC2::Instance
       Content:
@@ -852,6 +859,9 @@ Resources:
                   fi
                   AGE=$(echo "$H" | grep -o '"last_ingest_age_s":[-0-9]*' | cut -d: -f2)
                   FILES=$(echo "$H" | grep -o '"files":[0-9]*' | cut -d: -f2)
+                  # An upgrade that silently did nothing looks identical to one that
+                  # worked. This is how an operator tells them apart.
+                  SHA=$(echo "$H" | grep -o '"git_sha":"[^"]*"' | cut -d'"' -f4)
                   MPD=$(ls /dev/null 2>/dev/null; curl -s --max-time 5 "http://127.0.0.1:9094/${StreamName}.mpd")
                   INIT=$(echo "$MPD" | grep -o 'initialization="[^"]*"' | head -1 | sed 's/.*="//;s/"//')
                   INITCODE=""
@@ -887,6 +897,7 @@ Resources:
                   echo "   video arriving:      ${AGE}s ago  (0-2s is normal)"
                   echo "   segments in memory:  ${FILES}"
                   echo "   start-up file:       ${INITCODE:-n/a}  (200 = fine)"
+                  echo "   running version:     ${SHA:-unknown}  (MUST change after an upgrade)"
                   echo ""
                   echo " If viewers still report problems, it is not this server."
                   echo " Check the player, or the CloudWatch dashboard for viewer errors."
@@ -903,6 +914,7 @@ Resources:
     Properties:
       Name: !Sub '${ChannelPrefix}-3-UPGRADE-to-a-new-version'
       DocumentType: Command
+      UpdateMethod: NewVersion
       DocumentFormat: YAML
       TargetType: /AWS::EC2::Instance
       Content:
@@ -966,6 +978,7 @@ Resources:
     Properties:
       Name: !Sub '${ChannelPrefix}-2-RESTART-origin-service'
       DocumentType: Command
+      UpdateMethod: NewVersion
       DocumentFormat: YAML
       TargetType: /AWS::EC2::Instance
       Content:

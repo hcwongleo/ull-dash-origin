@@ -22,6 +22,19 @@ The template builds the server from a pinned git tag at first boot. Dependencies
 are vendored and the module proxy is disabled, so the only network dependency is
 this repository — a later change upstream cannot alter what you deployed.
 
+> **That one network dependency has to be reachable without credentials.** The boot
+> script runs `git clone` anonymously, so if the repository is private the build
+> fails and the instance never starts serving. A running server is unaffected — this
+> only bites when an instance is *built*: first deploy, a deliberate rebuild, or a
+> replacement triggered by a host failure or a newer AMI resolving under an unrelated
+> stack update.
+>
+> Before anything that replaces the instance, make sure `Source repository` points at
+> something the instance can clone with no credentials: a public repository, your own
+> fork or mirror, or a CodeCommit/S3 copy with the boot script adjusted to match.
+> Confirm with `git clone --depth 1 --branch <version> <url>` from a shell with no
+> GitHub credentials configured.
+
 **Deploying by CLI instead:**
 
 ```bash
@@ -76,55 +89,80 @@ curl -s -o /dev/null -w '%{time_starttransfer}\n' \
 ## Getting a fix onto the server
 
 Every code change is published as a **version tag** like `v0.5.1`. You will be told
-which version to install. There are two ways, and the difference matters.
+which version to install. It takes two steps, and doing only the second one is the
+mistake to avoid.
 
-### The normal way — update the stack (recommended)
-
-CloudFormation console → your stack → **Update** → *Use current template* → change
-the **Version to deploy** parameter to the new version → **Update stack**.
-
-Takes about 5 minutes and **replaces the server**.
-
-When the parameter form appears it shows the values your stack is **currently**
-using, not the template's defaults. Change only the version and leave the rest —
-that is deliberate, so an upgrade never quietly changes your instance size or
-anything else.
-
-**Why this is the recommended way:** if the new version fails to build or start,
-CloudFormation notices, gives up, and **puts the old server back automatically.** A
-broken fix cannot leave you with a broken stream. The Elastic IP moves across, so
-Elemental Live's destination does not change.
-
-### The fast way — the upgrade button (for emergencies)
+### Step 1 — the upgrade button (this is what actually upgrades)
 
 Systems Manager → **Run Command** → the document ending
 **`3-UPGRADE-to-a-new-version`** → type the version → **Run**.
 
-Takes about a minute. It keeps the previous version on disk, so it can be put back.
+Takes about a minute. It keeps the previous version on disk, so it can be put back,
+and it prints the version now running so you can confirm it worked.
 
-**Two catches.** There is no automatic rollback — if it fails, someone technical
-has to intervene. And it changes the *server* without changing the *stack*, so the
-next time the server is replaced for any reason it will quietly go back to the old
-version. Whoever maintains this must update the stack's version parameter
-afterwards. The button prints that reminder.
+If the build fails, it says so and the old server keeps running — but there is no
+*automatic* rollback, so someone technical should be around when you do this.
+
+### Step 2 — set the stack's version parameter to match (bookkeeping)
+
+CloudFormation console → your stack → **Update** → *Use current template* → change
+the **Version to deploy** parameter to the version you just installed → **Update
+stack**. Change only that, and leave every other value as shown.
+
+This does **not** upgrade anything. It is so that if the instance is ever replaced —
+a host failure, a new AMI, a deliberate rebuild — it builds the version you are
+actually running instead of an old one.
+
+> **Do not use step 2 on its own to change versions. It does not work, and it
+> interrupts the stream for nothing.**
+>
+> `UserData` is not a create-only property on `AWS::EC2::Instance`, so
+> CloudFormation rewrites the boot script in place and **reboots** the server rather
+> than replacing it — and the boot script only ever runs once per instance, so
+> nothing re-downloads and nothing rebuilds. You get `UPDATE_COMPLETE` in under a
+> minute, the stack reports the new version, and the old code is still serving.
+> Measured on 2026-09-13 going from v0.6.0 to v0.6.1 this way: 46 seconds,
+> same instance, old binary.
+>
+> There is no template flag that changes this. `UserDataReplaceOnChange` does not
+> exist in this resource schema; setting it fails the update with *extraneous key is
+> not permitted* (verified 2026-09-14). Nothing rolls back either, because there is
+> no build to fail.
+>
+> Always finish with the version check below. It is the only thing that tells you
+> what is really running.
 
 ### Either way — afterwards
 
-1. **Restart the output group in Elemental Live.** Both methods clear the server's
-   memory, so until you do, people already watching are fine but new viewers cannot
-   start.
-2. Run **`1-CHECK-stream-status`** to confirm.
+1. **Check the version actually changed.** This is not optional. An upgrade that
+   silently did nothing looks exactly like one that worked — same `UPDATE_COMPLETE`,
+   same healthy stream, old code. Run **`1-CHECK-stream-status`** and read the
+   **running version** line: it must have changed. If it is the same value as before
+   the upgrade, the upgrade did not happen — you probably did step 2 without step 1.
+   (That line was added in v0.6.2; on an older stack, run
+   `curl -s http://127.0.0.1:9095/-/healthz` on the box and read `git_sha`.)
+2. **Restart the output group in Elemental Live** if new viewers cannot start.
+   An upgrade clears the server's memory of media segments. Initialisation segments
+   are restored from disk, so usually this is *not* needed — the startup log says
+   `restored N initialisation segment(s) from disk; viewers can start immediately`,
+   and a new viewer works as soon as the encoder has published the next manifest,
+   about two seconds. Verified on 2026-09-13 across two restarts. Restart the output
+   group if that log line reports 0 segments, if `-persist-init` has been turned off,
+   or if a new player still gets 404 on the initialisation segment.
 
-### Which to use
+### What each step does
 
-| | Stack update | Upgrade button |
+| | Upgrade button (step 1) | Stack parameter (step 2) |
 |---|---|---|
-| Time | ~5 min | ~1 min |
-| Rolls back by itself if broken | **yes** | no |
-| Stack and server stay in sync | **yes** | no — needs a follow-up |
-| Elemental restart needed after | yes | yes |
+| Changes the running code | **yes** | no |
+| Time | ~1 min | ~1 min |
+| Interrupts the stream | briefly, service restart | briefly, reboot |
+| Survives a future instance replacement | no | **yes** |
+| Rolls back by itself if broken | no | nothing to roll back |
 
-Use the stack update unless the minutes matter.
+Do step 1, confirm the version, then do step 2. Skipping step 2 means a future
+replacement quietly reverts to the old version; doing step 2 alone changes nothing
+but still interrupts the stream.
 
 ## Running more than one channel on this origin
 
