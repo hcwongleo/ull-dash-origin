@@ -13,18 +13,21 @@ import (
 
 // How long a GET for a not-yet-present segment is held before it 404s.
 //
-// MUST EXCEED the MPD's availabilityTimeOffset. That is not a style preference: the
-// manifest tells players how early they may ask, and holding for less time than that
-// means refusing requests you invited. Upstream hardcoded 1000ms; with an
-// availabilityTimeOffset of 1.800 that stalled players for ~1.2s and then 404'd
-// them, and every retry moved their position - which is where fluctuating live
-// latency came from.
+// This is a ceiling on waiting for the FIRST CHUNK, not for the segment. It used to
+// have to exceed the manifest's availabilityTimeOffset, because waiters were released
+// only when the PUT finished - so a hold had to outlast a whole segment, and 2500ms
+// was chosen against an availabilityTimeOffset of 1.800. Releasing on first data made
+// that requirement obsolete: measured holds on the deployed origin are 360-540ms.
+//
+// It must stay SHORTER THAN ONE SEGMENT. With a stalled encoder every arriving request
+// is held to this ceiling, so a ceiling longer than the segment interval means held
+// requests accumulate faster than they drain, each one holding a goroutine, a socket
+// and a CloudFront connection. 2500ms against 2s segments had that property.
 //
 // Configurable rather than derived, because deriving it from the manifest would
 // couple the origin to the encoder's DASH configuration, and every such coupling in
-// this server has silently broken when the encoder was reconfigured. A generous
-// fixed value cannot.
-const defaultRequestExpirationFallback time.Duration = 2500 * time.Millisecond
+// this server has silently broken when the encoder was reconfigured.
+const defaultRequestExpirationFallback time.Duration = 1000 * time.Millisecond
 
 var requestExpirationMs atomic.Int64
 

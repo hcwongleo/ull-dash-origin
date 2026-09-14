@@ -30,19 +30,24 @@ Group=gochunked
 # -w holds a GET for a segment that has not arrived yet, instead of returning 404.
 #
 # It was previously OFF because it had been sized WRONG, not because it is wrong:
-# -wait-timeout-ms was 1000 while the manifest advertises
-# availabilityTimeOffset="1.800", so a player accepting that invitation was stalled
-# for 1.2s and then refused. Every retry moved its position, which is where the
-# fluctuating live latency came from.
+# -wait-timeout-ms was 1000 while waiters were released only when the PUT finished,
+# so a hold had to outlast a whole segment. A player accepting the manifest's
+# availabilityTimeOffset="1.800" invitation was stalled for 1.2s and then refused,
+# and every retry moved its position - the fluctuating live latency.
 #
-# 2500ms EXCEEDS the 1800ms the manifest invites, which is the whole point. The
-# alternative is worse at scale: 404s are not cached at the edge
-# (ErrorCachingMinTTL is 1s on 404 and 0 elsewhere), live requests are synchronised
-# because every viewer wants the same segment at the same instant, and so every
-# early request becomes an origin hit in a burst every segment boundary.
+# Waiters are now released on the FIRST CHUNK, so the hold only has to outlast the
+# wait for that chunk: 360-540ms measured on this origin. 1000ms gives that room
+# with margin, and stays SHORTER THAN ONE SEGMENT, which matters more. With a
+# stalled encoder every arriving request is held to the ceiling, so a ceiling above
+# the 2s segment interval makes held requests pile up faster than they drain. The
+# previous 2500ms had exactly that property.
+#
+# Holding rather than 404ing is still the right default at scale: live requests are
+# synchronised because every viewer wants the same segment at the same instant, so
+# refusing them turns each segment boundary into a burst of origin hits.
 #
 # The cost is that a held request occupies a goroutine and a connection for up to
-# 2.5s. That is why the goroutine alarm is set high, and why the instance is sized
+# 1s. That is why the goroutine alarm is set high, and why the instance is sized
 # for concurrency rather than for memory.
 ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -r \
@@ -55,7 +60,7 @@ ExecStart=/opt/gochunked/bin/go-chunked-streaming-server \
   -utc-timing https://time.akamai.com/?iso \
   -idle-sweep 3600 \
   -w \
-  -wait-timeout-ms 2500
+  -wait-timeout-ms 1000
 
 Restart=always
 RestartSec=2

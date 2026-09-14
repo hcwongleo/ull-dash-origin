@@ -72,7 +72,7 @@ reconfigured; an earlier build had six such couplings and two were wrong in prod
 
 ```
 -r -i 9094 -o cors.json -p content
--w -wait-timeout-ms 2500        hold early requests instead of refusing them
+-w -wait-timeout-ms 1000        hold early requests instead of refusing them
 -ingest-idle-timeout 10         bound ingest silence, not duration
 -idle-sweep 3600                reclaim what the encoder never deletes
 -persist-init                   initialisation segments survive a restart

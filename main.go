@@ -61,7 +61,7 @@ var (
 	// restarts the encoder. They are a few hundred bytes and arrive once per run.
 	persistInit = flag.Bool("persist-init", true, "Write initialisation segments under <content path>/init so they survive a restart, and reload them at start. Media segments are never written to disk")
 
-	waitTimeoutMs = flag.Int64("wait-timeout-ms", 2500, "Ceiling on how long a GET for a not-yet-arrived segment is held before it 404s. MUST exceed the MPD availabilityTimeOffset, or you refuse requests the manifest invited. Only used with -w. The hold releases as soon as data arrives, so this is a ceiling and not added latency")
+	waitTimeoutMs = flag.Int64("wait-timeout-ms", 1000, "Ceiling on how long a GET for a not-yet-arrived segment is held before it 404s. Only used with -w. The hold releases as soon as the first chunk arrives, so this is a ceiling and not added latency: measured holds are 360-540ms. Keep it SHORTER THAN ONE SEGMENT - with a stalled encoder every request is held to this ceiling, and a ceiling longer than the segment interval makes held requests pile up faster than they drain")
 
 	utcTimingURL = flag.String("utc-timing", "https://time.akamai.com/?iso", "URL injected as the DASH UTCTiming value on manifest ingest, using the http-iso scheme. Empty disables injection")
 )

@@ -74,10 +74,11 @@ Parameters:
       capped at 25% by the unit file and steady state is ~25MB.
 
       The load that scales with audience is held requests. -w holds a GET for a
-      not-yet-arrived segment for up to 2.5s, and live requests are synchronised
+      not-yet-arrived segment for up to 1s, and live requests are synchronised
       because every viewer wants the same segment at the same instant. At 100k
       viewers with ~10% early at any moment that is roughly 15,000 concurrent held
-      requests, about 3.5 cores by measurement (2000 readers = 0.39 cores). 16 vCPU
+      requests, about 3.5 cores by measurement (2000 readers = 0.39 cores), sized at the
+      old 2.5s hold so now conservative. 16 vCPU
       is ~4x that. Note the 100k figure is extrapolated, not tested.
 
   AmiId:
@@ -608,7 +609,7 @@ Resources:
       Period: 300
       EvaluationPeriods: 3
       # High because -w is enabled: a held request legitimately occupies a goroutine
-      # for up to 2.5s, so at scale tens of thousands are normal rather than a leak.
+      # for up to 1s, so at scale tens of thousands are normal rather than a leak.
       # This is watching for a ratchet that never comes down, not for load.
       Threshold: 30000
       ComparisonOperator: GreaterThanThreshold

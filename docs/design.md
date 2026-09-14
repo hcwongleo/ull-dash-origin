@@ -237,8 +237,10 @@ segment 1.8 s early. With `-w`, such a request is held until the data arrives.
 **The hold must exceed what the manifest invites.** Upstream hardcoded 1000 ms.
 Against 1.8 s that stalled players for ~1.2 s and then refused them, and every retry
 moved the player's position — the fluctuating live latency seen in production. It is
-now `-wait-timeout-ms`, default **2500 ms**, with a test that fails if anyone lowers
-the default below 1.8 s.
+now `-wait-timeout-ms`, default **1000 ms**. Waiters are released on the first chunk,
+so the hold only has to outlast the wait for that — 360–540 ms measured — and the
+ceiling must stay *under one segment*, or a stalled encoder makes held requests pile
+up faster than they drain. A test asserts both bounds.
 
 Configurable rather than derived from the manifest, deliberately: every coupling
 between this origin and the encoder's DASH configuration has silently broken when the
@@ -453,7 +455,7 @@ production.
 -o cors.json                CORS policy
 -p content                  content path
 -w                          hold a GET for a not-yet-arrived segment
--wait-timeout-ms 2500       the hold ceiling; MUST exceed availabilityTimeOffset
+-wait-timeout-ms 1000       the hold ceiling; must stay under one segment
 -ingest-idle-timeout 10     abort an ingest silent this long
 -idle-sweep 3600            reclaim complete non-init files idle this long
 -init-pattern <regex>       what is exempt from sweeping, and what is persisted

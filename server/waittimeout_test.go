@@ -28,14 +28,35 @@ func TestWaitTimeoutIsConfigurable(t *testing.T) {
 	}
 }
 
-// The default must exceed a typical availabilityTimeOffset of 1.8s. If someone
-// lowers it below that in future, this test is the thing that objects.
-func TestDefaultWaitTimeoutExceedsTypicalAvailabilityTimeOffset(t *testing.T) {
-	const typicalATO = 1800 * time.Millisecond
+// The ceiling has to sit between two measured facts, and the old rule - "exceed
+// availabilityTimeOffset" - is no longer one of them.
+//
+// That rule was correct only while waiters were released at PUT completion: a hold
+// then had to outlast the whole segment. Since waiters are released on the FIRST
+// chunk, a hold only has to outlast the wait for that chunk, measured at 360-540ms
+// on the deployed origin.
+//
+// The upper bound is what the old rule got wrong. A ceiling longer than one segment
+// means a stalled encoder pins every arriving request for longer than the interval
+// at which new ones arrive, so held requests accumulate across segment boundaries
+// instead of draining - each one holding a goroutine, a socket and a CloudFront
+// connection.
+func TestDefaultWaitTimeoutSitsBetweenFirstChunkLatencyAndSegmentDuration(t *testing.T) {
+	const (
+		measuredFirstChunkHold = 540 * time.Millisecond
+		segmentDuration        = 2000 * time.Millisecond
+		wantMargin             = 300 * time.Millisecond
+	)
 
-	if defaultRequestExpirationFallback <= typicalATO {
-		t.Fatalf("default hold is %v, which does not exceed a typical availabilityTimeOffset of %v: "+
-			"players accepting the manifest's invitation would be stalled and then refused",
-			defaultRequestExpirationFallback, typicalATO)
+	if defaultRequestExpirationFallback < measuredFirstChunkHold+wantMargin {
+		t.Errorf("default hold is %v, too close to the measured %v wait for a first chunk: "+
+			"requests the manifest invited would be refused whenever the encoder jitters",
+			defaultRequestExpirationFallback, measuredFirstChunkHold)
+	}
+
+	if defaultRequestExpirationFallback >= segmentDuration {
+		t.Errorf("default hold is %v, which is not shorter than one %v segment: with a stalled "+
+			"encoder, held requests would arrive faster than they drain and pile up",
+			defaultRequestExpirationFallback, segmentDuration)
 	}
 }
