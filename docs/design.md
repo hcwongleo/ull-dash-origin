@@ -86,7 +86,7 @@ either way.**
 |---|---|---|
 | `*.mpd` | 1 s | At or below the encoder's `minimumUpdatePeriod`. A stale manifest moves the player's idea of the live edge |
 | segments | 6 h | Immutable once written. **Safe only because segment names carry a per-run token** — recycled names would serve stale video |
-| 404 | 1 s | ULL players request segments before they exist because the manifest invites it, and those requests are synchronised across the audience. Uncached, that is one origin hit per viewer in a burst every segment boundary. 1 s collapses it to one per POP |
+| 404 | 0 | Standard for a live edge, and specifically right with `-w`: an early request is held and served, so a 404 means the hold already expired. Caching it then delays a segment that may already exist — up to 1 s on top of the hold, against a measured ~1.2 s margin |
 | 403, 5xx | 0 | Never cache a negative at the live edge |
 
 ---

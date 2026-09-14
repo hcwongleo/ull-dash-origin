@@ -492,14 +492,12 @@ Resources:
           # for a moment early exists a moment later.
           - ErrorCode: 403
             ErrorCachingMinTTL: 0
-          # 404 is the one negative worth caching, briefly. ULL players request
-          # segments before they exist because the manifest invites it, and those
-          # requests are synchronised across the whole audience - so an uncached 404
-          # is one origin hit per viewer, in a burst every segment boundary. One
-          # second collapses that to one per POP while costing at most 1s of
-          # staleness on a segment that has just become available.
+          # 404 included. With -w an early request is HELD and then served, so a 404
+          # means the hold already timed out - the encoder is late. Caching that would
+          # delay a segment that may exist by then, on top of the hold: up to 1s more
+          # against a measured ~1.2s margin, turning a hiccup into a certain stall.
           - ErrorCode: 404
-            ErrorCachingMinTTL: 1
+            ErrorCachingMinTTL: 0
           - ErrorCode: 500
             ErrorCachingMinTTL: 0
           - ErrorCode: 502
