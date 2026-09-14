@@ -846,7 +846,7 @@ Resources:
             inputs:
               timeoutSeconds: '60'
               runCommand:
-                - |
+                - !Sub |
                   echo "==============================================="
                   H=$(curl -s --max-time 5 http://127.0.0.1:9095/-/healthz)
                   if [ -z "$H" ]; then
@@ -894,10 +894,10 @@ Resources:
 
                   echo " OK - the stream is healthy."
                   echo ""
-                  echo "   video arriving:      ${AGE}s ago  (0-2s is normal)"
-                  echo "   segments in memory:  ${FILES}"
-                  echo "   start-up file:       ${INITCODE:-n/a}  (200 = fine)"
-                  echo "   running version:     ${SHA:-unknown}  (MUST change after an upgrade)"
+                  echo "   video arriving:      ${!AGE}s ago  (0-2s is normal)"
+                  echo "   segments in memory:  ${!FILES}"
+                  echo "   start-up file:       ${!INITCODE:-n/a}  (200 = fine)"
+                  echo "   running version:     ${!SHA:-unknown}  (MUST change after an upgrade)"
                   echo ""
                   echo " If viewers still report problems, it is not this server."
                   echo " Check the player, or the CloudWatch dashboard for viewer errors."

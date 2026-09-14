@@ -141,14 +141,21 @@ actually running instead of an old one.
    the upgrade, the upgrade did not happen — you probably did step 2 without step 1.
    (That line was added in v0.6.2; on an older stack, run
    `curl -s http://127.0.0.1:9095/-/healthz` on the box and read `git_sha`.)
-2. **Restart the output group in Elemental Live** if new viewers cannot start.
-   An upgrade clears the server's memory of media segments. Initialisation segments
-   are restored from disk, so usually this is *not* needed — the startup log says
-   `restored N initialisation segment(s) from disk; viewers can start immediately`,
-   and a new viewer works as soon as the encoder has published the next manifest,
-   about two seconds. Verified on 2026-09-13 across two restarts. Restart the output
-   group if that log line reports 0 segments, if `-persist-init` has been turned off,
-   or if a new player still gets 404 on the initialisation segment.
+2. **Restart the output group in Elemental Live**, unless you have positively
+   confirmed that a *fresh* player can start. An upgrade clears the server's memory of
+   media segments.
+
+   Initialisation segments are restored from disk, but treat the startup log line
+   `restored N initialisation segment(s) from disk` as a claim, **not** as proof. A
+   restore defect served those segments one byte too long for 22 hours on 2026-09-14:
+   a byte-shifted init segment returns HTTP 200, the manifest and every media segment
+   stay perfectly healthy, all alarms stay green — and every viewer sees a black
+   screen. Checking the status code is not enough; only playing it is.
+
+   Since v0.6.3 the server refuses an initialisation segment with no `ftyp` box, so a
+   bad one now surfaces as a 404 that step 1 reports instead of as silence. Restarting
+   the output group costs seconds and is the only thing that re-sends those segments,
+   so when in doubt, restart it.
 
 ### What each step does
 

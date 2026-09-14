@@ -277,7 +277,10 @@ func TestMultipleChannelsCoexist(t *testing.T) {
 	for i, n := range names {
 		h := http.Header{}
 		h.Set("Content-Type", "video/mp4")
-		PersistInit(n, h, []byte(fmt.Sprintf("moov-%d", i)))
+		// Must open with an ftyp box: LoadPersisted refuses anything that is not a
+		// real initialisation segment. The tail stays per-channel so this still
+		// detects channels sharing a file.
+		PersistInit(n, h, []byte(fmt.Sprintf("\x00\x00\x00\x1cftypiso6moov-%d", i)))
 	}
 
 	FilesLock.Lock()
@@ -299,7 +302,7 @@ func TestMultipleChannelsCoexist(t *testing.T) {
 		f.lock.RLock()
 		got := string(f.buffer)
 		f.lock.RUnlock()
-		if want := fmt.Sprintf("moov-%d", i); got != want {
+		if want := fmt.Sprintf("\x00\x00\x00\x1cftypiso6moov-%d", i); got != want {
 			t.Errorf("%s has %q, want %q - channels are sharing a file", n, got, want)
 		}
 	}
@@ -317,7 +320,7 @@ func TestLoadSkipsUnreadableFilesWithoutFailing(t *testing.T) {
 	// Garbage, a name that decodes to nothing useful, and a partial write.
 	for name, content := range map[string]string{
 		"not-a-valid-name":                    "junk",
-		encodeName("/good_init.mp4"):          "Content-Type: video/mp4\n\nreal",
+		encodeName("/good_init.mp4"):          "Content-Type: video/mp4\n\n\x00\x00\x00\x1cftypiso6real",
 		encodeName("/half_init.mp4") + ".tmp": "half written",
 		"%ZZbad_init.mp4":                     "bad encoding",
 	} {

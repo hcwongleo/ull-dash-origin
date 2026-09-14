@@ -210,6 +210,16 @@ func PersistInit(name string, headers http.Header, body []byte) {
 	var buf bytes.Buffer
 	if ct := headers.Get("Content-Type"); ct != "" {
 		buf.WriteString("Content-Type: " + ct + "\n")
+	} else {
+		// The encoder does not always send Content-Type. With no header line the
+		// separator below is the ONLY "\n\n" in the file, so it has to be a full
+		// blank line rather than a lone newline - otherwise LoadPersisted finds no
+		// separator, takes the whole file as the body, and recovers it one byte long.
+		// That shipped an init segment beginning "\n" then ftyp, which no player can
+		// parse: black screen for every new viewer, with the manifest, the media
+		// segments and every HTTP status all still healthy. 22 hours of dark channel
+		// on 2026-09-14 before it was spotted.
+		buf.WriteString("\n")
 	}
 	buf.WriteString("\n")
 	buf.Write(body)
@@ -338,6 +348,19 @@ func LoadPersisted() int {
 			body = raw[i+2:]
 		}
 
+		// Files written by older builds cannot always be split correctly, and a body
+		// recovered at the wrong offset is worse than no body at all: it is served
+		// with status 200, looks healthy on every dashboard, and shows viewers a black
+		// screen. Refusing it produces a 404 instead, which is recoverable and which
+		// 1-CHECK-stream-status already tells the operator how to fix.
+		if !looksLikeInitSegment(body) {
+			logWarnf("refusing to restore %s: no ftyp box, so this is not a usable "+
+				"initialisation segment. New viewers will get 404 until the Elemental "+
+				"Live output group is restarted, which re-sends it.", name)
+
+			continue
+		}
+
 		f := NewFile(name, headers, -1)
 		f.Write(body)
 		f.Close()
@@ -353,6 +376,17 @@ func LoadPersisted() int {
 	}
 
 	return loaded
+}
+
+// looksLikeInitSegment reports whether body plausibly is one.
+//
+// Every ISO-BMFF file opens with a 4-byte box size followed by the box type, and for
+// an initialisation segment that type is ftyp. Checking it is what turns a corrupt
+// persisted file into an honest 404 rather than media that fails silently in the
+// player. The check is deliberately shallow - it catches a wrong offset, which is the
+// failure that has actually happened, without pretending to validate the container.
+func looksLikeInitSegment(body []byte) bool {
+	return len(body) >= 8 && bytes.Equal(body[4:8], []byte("ftyp"))
 }
 
 // cut is strings.Cut, which needs go1.18; go.mod declares 1.13.
