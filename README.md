@@ -38,7 +38,7 @@ Elemental and the player URL.
 latency at all and nothing reports an error. `UTCTiming` needs nothing configured —
 the origin injects it.
 
-Everything else has a working default: `c8g.4xlarge`, 30 GB encrypted gp3, five alarms,
+Everything else has a working default: `c8gn.2xlarge`, 30 GB encrypted gp3, five alarms,
 a dashboard, and three operator buttons in Systems Manager.
 
 ## Documentation

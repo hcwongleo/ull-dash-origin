@@ -68,16 +68,41 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: c8g.4xlarge
+    Default: c8gn.2xlarge
     Description: >-
-      Graviton4, 16 vCPU / 32 GB. Sized for CONCURRENCY, not memory: memory is
-      capped at 25% by the unit file and steady state is ~25MB.
+      Graviton4, 8 vCPU / 16 GB, 25 Gbps baseline (50 Gbps peak). Sized for
+      NETWORK, which is the only binding constraint. Must stay arm64 to match
+      AmiId and the compiled binary.
 
-      Sized for held requests under -w: 100k viewers with ~10% early at any moment is
-      roughly 15,000 concurrent held requests, about 3.5 cores by measurement (2000
-      readers = 0.39 cores), and 16 vCPU is ~4x that. -w is now OFF (it deadlocks; see
-      deploy/gochunked.service), so nothing is held and this is spare headroom rather
-      than a requirement. The 100k figure is extrapolated, not tested.
+      Measured 2026-09-15, 20,000 synthetic viewers for 300s across four regions
+      (testing/loadtest in the private working repo): 12.18M requests at 35,105
+      req/s, all 200, zero 4xx/5xx, 15 client exceptions in 12.18M. The origin
+      barely moved - CPU 1-4% of 16 vCPU, peak heap 150MB, ~4,400 established
+      connections, goroutines under 5,000, and last_ingest_age_s never left 0-1s
+      so the live encoder was unaffected throughout.
+
+      That retires the previous 16 vCPU / 32 GB sizing, which was chosen for
+      concurrency under -w. -w is OFF (it deadlocks; see deploy/gochunked.service),
+      so nothing is held, and the measurement shows 8 vCPU is still ~10x what is
+      needed and 16 GB ~100x the peak heap.
+
+      Network is what matters because origin egress is not viewers x bitrate, it is
+      viewers x bitrate x (1 - cache hit ratio). At 20k viewers x 4.2 Mbps the edge
+      absorbs 84 Gbps of demand and the origin sees only the misses. The measured
+      hit ratio was 97.56%, implying 2.05 Gbps at the origin.
+
+      Sizing is therefore a bet on the hit ratio holding. 25 Gbps baseline tolerates
+      it falling to 70.2% before the NIC saturates; c8g.4xlarge's 7.5 Gbps saturates
+      at 91.1% and c8g.2xlarge's 3.75 Gbps at 95.5%. The wide margin is deliberate:
+      a cache-key regression collapses the hit ratio without warning, and the
+      CDN-ingest pipeline has already lost its key once to forwarded
+      cloudfront-viewer-* headers. c8gn.2xlarge also costs less than the c8g.4xlarge
+      it replaces ($458/mo vs $585 on-demand in ap-east-1).
+
+      CAVEAT: the 2.05 Gbps was never actually driven. The load test ran in cap mode,
+      reading only the first 32KB of each segment, so that figure is arithmetic from
+      the hit ratio rather than a measured line rate. Before downsizing further, drive
+      it for real with --mode full.
 
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>

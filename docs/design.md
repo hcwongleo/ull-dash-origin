@@ -539,17 +539,71 @@ are necessary and not sufficient.
 Measured on the deployed origin with a live stream: **0.0036 cores, 24.6 MB RSS,
 ~1 MB/s of unique content.**
 
-`c8g.4xlarge` (16 vCPU / 32 GB) is therefore ~2000× the measured CPU. It is sized for
-**concurrency, not memory**. That sizing was done for `-w`, where a held request
+The default is `c8gn.2xlarge` (Graviton4, 8 vCPU / 16 GB, **25 Gbps baseline**, 50 Gbps
+peak). It is sized for **network**, which is the only binding constraint.
+
+The earlier `c8g.4xlarge` was sized for concurrency under `-w`, where a held request
 occupies a goroutine and a connection: at 100k viewers with ~10% early at any instant,
 ~15,000 concurrent held requests, about 3.5 cores by measurement (2000 readers = 0.39
-cores). With `-w` off nothing is held, so this is now generous headroom rather than a
-requirement. Memory cannot be the constraint: `MemoryMax` is 25% and steady state is
-25 MB.
+cores). With `-w` off nothing is held, so that rationale no longer applies.
 
-**Origin load does not scale with audience.** Segments cache 6 h at the edge with
-request collapsing, so the origin serves roughly one fetch per POP per segment, not
-per viewer. 100k viewers and 100 look nearly identical to it.
+### What 20,000 viewers actually did
+
+Measured 2026-09-15: 20,000 synthetic viewers for 300 s across four regions,
+**12,178,904 requests at 35,105 req/s, every one a 200**, zero 4xx, zero 5xx, zero
+segment 404s, and 15 client-side exceptions in 12.18M (0.0001%). On the origin:
+
+| | baseline | at 20k viewers | limit |
+|---|---|---|---|
+| CPU | 1% | **1–4%** | 16 vCPU |
+| peak heap | 13 MB | **150 MB** | 7.7 GB `MemoryMax` |
+| established connections | 46 | **3,162–4,401** | 65,535 fds |
+| goroutines | 53 | 3,169–4,982 | — |
+| SYN backlog | 0 | 0–46 (252 at ramp) | `somaxconn` 4096 |
+| `last_ingest_age_s` | 0 | **0–1 throughout** | — |
+
+CPU and memory are non-binding by two orders of magnitude, so 8 vCPU and 16 GB are
+ample. `OriginLatency` rose from 60 ms idle to 866 ms in the first minute — the
+thundering herd of 20k viewers starting together — then settled to 275–383 ms and
+recovered fully.
+
+### Why network, and why so much of it
+
+Origin egress is not viewers × bitrate. It is:
+
+```
+origin egress = viewers × bitrate × (1 − cache hit ratio)
+```
+
+At 20k viewers × 4.2 Mbps the edge absorbs 84 Gbps of demand and the origin sees only
+the misses. The measured hit ratio was **97.56%**, implying **2.05 Gbps** at the origin.
+
+Sizing is therefore a bet on the hit ratio holding, and the NIC decides how wrong that
+bet may be:
+
+| instance | net baseline | hit ratio may fall to |
+|---|---|---|
+| `c8gn.2xlarge` | 25 Gbps | **70.2%** |
+| `c8g.4xlarge` | 7.5 Gbps | 91.1% |
+| `c8g.2xlarge` | 3.75 Gbps | 95.5% |
+
+The wide margin is deliberate. A cache-key regression collapses the hit ratio without
+warning, and the CDN-ingest pipeline has already lost its key once to forwarded
+`cloudfront-viewer-*` headers. `c8gn.2xlarge` also costs **less** than the
+`c8g.4xlarge` it replaces — $458/mo against $585 on-demand in ap-east-1.
+
+**Origin load scales with audience, but sublinearly.** Segments cache at the edge with
+request collapsing, so the origin serves roughly one fetch per POP per segment rather
+than per viewer — and the hit ratio *improves* as the audience grows, because more
+viewers share each cached segment: 84.3% at 25 viewers, 83.47% at 1,000, 97.56% at
+20,000. Small-scale numbers are floors, not forecasts. But 100 viewers and 100k do not
+look identical to the origin: 16% of 0.42 Gbps is 0.067 Gbps, while 2.4% of 84 Gbps is
+2.05 Gbps — a 30× difference.
+
+> **Caveat.** The 2.05 Gbps was never actually driven. The load test ran in `cap` mode,
+> reading only the first 32 KB of each segment, so the figure is arithmetic from the
+> measured hit ratio and not an observed line rate. Before downsizing below
+> `c8gn.2xlarge`, drive it for real with `--mode full`.
 
 Storage is 30 GB gp3 against 2.4 GB in use. gp3 decouples performance from capacity —
 8 GB and 100 GB both give 3000 IOPS and 125 MB/s — so a larger volume buys capacity
