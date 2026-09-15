@@ -610,3 +610,146 @@ Storage is 30 GB gp3 against 2.4 GB in use. gp3 decouples performance from capac
 only.
 
 The 100k figure is extrapolated from 2000 synthetic readers. It has not been tested.
+
+---
+
+## 12. Origin failover, and template rationale
+
+### The failover design
+
+`origin-stack.yaml` can put a second EC2 origin behind the first using a CloudFront origin
+group. Set `BackupOriginEip` to that origin's Elastic IP to enable it; leave it empty and
+the distribution targets `ec2-origin` directly, exactly as before.
+
+The backup is **another deployment of this same template** — different `ChannelPrefix`, a
+smaller `InstanceType`, and a different `AvailabilityZoneIndex`. Measured need at 20,000 viewers is 0.5 vCPU, 138 MB heap and
+0.432 Gbps, so `c8gn.large` (2 vCPU, 4 GiB, 6.25 Gbps, ~$115/mo) is roughly 4x CPU, 7x
+memory and 14x network headroom. Avoid `c8gn.medium`: 0.5 vCPU on 1 vCPU sits at ~50%,
+which is exactly where `CpuAlarmPercent` fires.
+
+**One group serves both the manifest and the segments.** Both origins run the same build
+and inject their own `UTCTiming`, so neither behaviour needs a different secondary.
+
+| behaviour | primary | secondary |
+|---|---|---|
+| default (segments) | `ec2-origin` | `ec2-backup` |
+| `*.mpd` | `ec2-origin` | `ec2-backup` |
+
+**One encoder output must push to both origins.** Segment filenames carry a per-run token
+(`ch18live-v-fhd_20260915T061532_000003971.mp4`). A *separate* Elemental Live output
+produces a different token, so the two origins share no filenames and every failover
+request 404s at the secondary — permanently. This was observed directly: pointing the group
+at the CDN-ingest test origin returned 404 with a 30.2 s TTFB, which is failover working
+correctly against an origin that does not have the file.
+
+Two `http://` chunked destinations on one output group satisfies this naturally, which is
+the main reason the backup is EC2 rather than S3.
+
+**Why not S3.** S3 was the first choice — cheaper and more reliable as a store. It was
+rejected on feasibility. Elemental Live writes to S3 over `s3://`/`s3ssl://` via the AWS
+SDK, not as an HTTP push, and protocol and chunked-transfer are output-group-level
+settings. So an S3 destination almost certainly cannot share an output group with the
+`http://` origin, which breaks the identical-filenames requirement above. S3 also holds
+only complete segments, so it lags the primary by ~1.8 s and would 404 at the live edge,
+and its manifest needs a Lambda Function URL to add `UTCTiming` because raw S3 serves the
+encoder's manifest verbatim — a player without `UTCTiming` falls back to the device clock
+and gap-jumps (`dash.js Error 16`, 6.08 s jump). Two EC2 origins avoid all of it, at the
+cost of ~$115/mo instead of ~$5.
+
+**Failover criteria are 500/502/503/504 only.** `404` and `403` are deliberately excluded.
+With `-w` off a 404 is the normal answer to a request that beat the encoder — 14 of them
+occurred in a 12.16M-request load test — so including it would fail over during healthy
+operation.
+
+**`OriginReadTimeoutSeconds` defaults to 5, down from 60.** A status code never catches a
+*hung* origin, which is the shape the `-w` deadlock took: requests stopped returning rather
+than erroring. Measured packet cadence on this stream is ~0.2 s (a segment is delivered in
+1.814 s in ~0.2 s steps), so 5 s is roughly 25x margin and should not false-trigger. Set it
+to 60 to restore the previous behaviour; it is a CloudFront-only stack update with no
+instance impact.
+
+**Put them in different AZs.** `AvailabilityZoneIndex` selects the AZ (0/1/2; ap-east-1 has
+three). It defaults to 0, so two stacks deployed with defaults land in the *same* AZ and an
+AZ event takes primary and backup together. Deploy the backup with index 1.
+
+**What failover does not solve.** It covers the loss of one origin — crash, hang, host
+event, stop, or a failed instance replacement. It does not cover:
+
+- **The encoder stopping.** One encoder, one output. Section 10 and the operator documents
+  both note this is the most common incident, and it is not an origin fault.
+- **The single output.** The requirement that makes failover work — one Elemental output
+  pushing to both origins so filenames match — means that output is a *shared* failure
+  point. If it stops, both origins go stale simultaneously. The mechanism that enables
+  failover is also what caps it.
+- **A bad build**, since both origins run the same `ReleaseTag`.
+- **CloudFront itself**: one distribution, one CDN, and a single `BaseURL` in the manifest,
+  so nothing routes around it.
+
+Broadcast-grade HA would add redundant encoders with synchronised output, two independent
+ingest chains, multi-CDN with a switching layer, and multiple `BaseURL` entries so the
+player can fail over. This is origin redundancy, which is one layer of that. Section 10's
+"No HA — accepted requirement" still stands; this improves on it rather than replacing it.
+
+### Template rationale, relocated
+
+The template must stay under **51,200 bytes** — CloudFormation's limit for a body passed
+inline, which is the path `aws cloudformation deploy --template-file` and
+`create-stack --template-body` take. Console upload goes via S3 and allows 1 MB, so
+breaking the inline path is easy to miss. Adding failover exceeded the limit, so the
+rationale below was moved out of the template rather than deleted.
+
+**Security group: two ingress rules, same port, different sources.** The encoder for
+`PUT`/`DELETE`, CloudFront's origin-facing prefix list for `GET`. This is the one real
+security gain of direct ingest: with an ingest CDN in front, the prefix list has to allow
+write methods, so *any* CloudFront distribution in the world can PUT to your origin.
+
+**EIP.** The encoder's destination should not change when the instance is stopped and
+started. A public DNS name does change, and re-pointing a live encoder is not something
+you want on the critical path of a recovery.
+
+**Segment cache TTL is long only because names are unique.** The encoder's segment names
+carry a per-run token, so a name is never reused for different bytes. Verify that before
+raising the TTL: if names are ever recycled, viewers are served stale video, which is far
+worse than a cache miss.
+
+**`ingest-stale` alarm, and `TreatMissingData: breaching`.** The highest-value alarm, and
+nothing to do with leaks — it is the only thing that reports the stream is off the air
+without a viewer complaining. The publisher deliberately sends *nothing* when the origin's
+admin endpoint does not answer, because a zero would be indistinguishable from a healthy
+reading. Absent data therefore means the origin is not answering, which is exactly when it
+should fire.
+
+**Goroutine threshold is deliberately slack.** It was set for `-w`, where a held request
+legitimately occupies a goroutine. With `-w` off nothing is held, so 30,000 is very loose —
+but a climb here is still the shape every leak in this server has had. It watches for a
+ratchet that never comes down, not for load.
+
+**`host-check-failed` alarm exists to tell you to restart the encoder output.** EC2
+automatic recovery is enabled by default and migrates the instance without being asked,
+but it does not notify, and recovery empties RAM. Elemental Live sends initialisation
+segments only when an output group starts, so after a host event new viewers get 404 on
+init until the encoder output is restarted. Existing viewers keep playing, which is what
+makes it easy to miss. `-persist-init` mitigates this, but the alarm remains the signal.
+
+**There is deliberately no CloudFront alarm.** CloudWatch alarms are regional and
+CloudFront publishes only to `us-east-1` — verified: `AWS/CloudFront` has 0 metrics in
+`ap-east-1` and 100 in `us-east-1`. An alarm here would sit in `OK` forever and never fire,
+and putting one in `us-east-1` means a second stack plus a second SNS topic and email
+confirmation, for a single rate-based metric that is silent until you have an audience. The
+origin-side alarms cover the same ground: if the origin stops answering, `ingest-stale`
+fires. CloudFront errors stay visible on the dashboard, which *can* graph across regions —
+only alarms cannot.
+
+**Operator buttons.** Three SSM documents, so a non-technical operator never has to open a
+shell or remember a command: Systems Manager → Run Command → pick one → Run. The `CHECK`
+document exists because the most common incident is not a broken origin at all — it is the
+encoder having stopped, or initialisation segments missing after a restart. Both look like
+"the stream is broken" and neither is fixed by touching this server. Rebooting when init
+segments are missing makes it **worse**: it clears RAM again and the encoder still has to
+be restarted.
+
+**`RESTART-origin-service` is the emergency path.** The normal path is a stack update,
+which replaces the instance and therefore rolls back automatically if the new build fails
+(see `operations.md`). This exists for when minutes matter, and it deliberately prints a
+drift warning: it changes the running instance without changing the stack, so the next
+instance replacement reverts unless `ReleaseTag` is updated too.

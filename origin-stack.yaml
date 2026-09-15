@@ -9,14 +9,10 @@ Description: >-
 # Console upload goes via S3 and allows 1 MB, but breaking the CLI path would be a
 # nasty surprise for whoever automates this. Rationale lives in docs/, not here.
 #
-# WHY DIRECT INGEST, in one paragraph
-#   A CDN's value is fan-out to many readers, and ingest has exactly one writer - so
-#   an ingest CDN adds a hop and a Lambda invocation for nothing. It also forces the
-#   security group to accept write methods from CloudFront's entire prefix list,
-#   which puts every distribution in the world inside your write perimeter. Here
-#   writes come only from EncoderCidr. The cost is that ingest is plaintext HTTP.
-#   Full reasoning, and the unresolved question of whether an ingest CDN coalesces
-#   the chunked body: docs/design-notes.md.
+# WHY DIRECT INGEST
+#   Ingest has one writer, so a CDN in front of it adds a hop for no fan-out, and
+#   forces the security group to accept writes from CloudFront's whole prefix list.
+#   Here writes come only from EncoderCidr. Full reasoning: docs/design.md.
 #
 # SECURITY
 #   Ingest is UNAUTHENTICATED. EncoderCidr is the only control, has no default, and
@@ -36,7 +32,7 @@ Metadata:
       - Label: { default: 'Monitoring' }
         Parameters: [AlarmEmail, HeapAlarmBytes, IngestStaleAlarmSeconds, MetricNamespace]
       - Label: { default: 'Advanced' }
-        Parameters: [RepoUrl, AmiId, OriginPort, RootVolumeSizeGb, CloudFrontOriginPrefixList, SegmentCacheSeconds]
+        Parameters: [BackupOriginEip, AvailabilityZoneIndex, OriginReadTimeoutSeconds, RepoUrl, AmiId, OriginPort, RootVolumeSizeGb, CloudFrontOriginPrefixList, SegmentCacheSeconds]
     ParameterLabels:
       EncoderCidr: { default: 'Elemental Live public IP (as a /32)' }
       AlarmEmail: { default: 'Email for alarms (optional)' }
@@ -84,18 +80,47 @@ Parameters:
       Kong. Also a sizing lever - egress scales with POP count - and narrowing it adds
       latency for distant viewers. See docs/design.md sec 11.
 
+  BackupOriginEip:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$'
+    Description: >-
+      Elastic IP of a SECOND origin from this same template, for CloudFront failover.
+      Empty disables failover. Deploy that stack with a different ChannelPrefix, a
+      smaller InstanceType (c8gn.large is 14x the measured need) and a different
+      AvailabilityZoneIndex.
+
+      ONE Elemental output must push to BOTH origins, or segment names will not match
+      and every failover 404s. Both are http:// chunked, so one output group can hold
+      two destinations. docs/design.md sec 12.
+
+  AvailabilityZoneIndex:
+    Type: Number
+    Default: 0
+    AllowedValues: [0, 1, 2]
+    Description: >-
+      Which AZ in the region to place the origin in. Deploy the FAILOVER origin with a
+      different index, or an AZ event takes primary and backup together - both default
+      to 0. Changing it on a live stack REPLACES the instance.
+
+  OriginReadTimeoutSeconds:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 60
+    Description: >-
+      Idle gap tolerated between origin packets before failing over. Measured cadence
+      is ~0.2s, so 5 is ~25x margin. The only thing that catches a HUNG origin. Set 60
+      to disable fast failover.
+
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
     Description: >-
-      Resolved automatically so nothing has to be looked up by hand.
-
-      CAUTION ON STACK UPDATES: this resolves the PATH, not a fixed value, so a
-      later Amazon Linux release will replace the instance during an unrelated
-      stack update. Rebuilding is harmless, but the replacement clears RAM, and
-      Elemental Live only sends initialisation segments at output start - so it
-      needs an encoder output restart. When updating, pass an explicit ami-xxxx
-      to hold the instance still.
+      CAUTION ON STACK UPDATES: this resolves the PATH, not a fixed AMI, so a newer
+      Amazon Linux release REPLACES the instance during an unrelated update. That
+      clears RAM and needs an encoder output restart. Compare the running ImageId
+      against this path before any update. docs/operations.md.
 
   ReleaseTag:
     Type: String
@@ -146,33 +171,26 @@ Parameters:
     Default: 30
     MinValue: 8
     Description: >-
-      Root volume size. Measured usage is 2.4 GB, and the worst case is about 3.2 GB
-      once journald reaches its cap of 10% of the filesystem. Nothing else is
-      written to disk - content is held in RAM.
-
-      Note this is gp3, where IOPS and throughput are DECOUPLED from size: 8 GB and
-      100 GB both give 3000 IOPS and 125 MB/s. Enlarging the volume buys capacity
-      only, not speed. 20 GB is comfortable headroom for patching and dnf cache.
+      Root volume size. Measured usage is 2.4 GB, worst case ~3.2 GB once journald hits
+      its cap. Content is held in RAM, not here. gp3 decouples IOPS from size, so a
+      bigger volume buys capacity only. docs/design.md sec 11.
 
   CpuAlarmPercent:
     Type: Number
     Default: 50
     Description: >-
-      Alarm above this CPU for 15 minutes. Measured steady state is 0.0036 cores -
-      about 0.05% of 8 vCPU - so 50% is ~1000x normal. It exists as a backstop for
-      any runaway, including the read-path spin that cost one core per viewer
-      before it was fixed: six stuck readers on 8 vCPU would sit around 75%.
+      Alarm above this CPU for 15 minutes. Steady state is 0.0036 cores (~0.05% of
+      8 vCPU), so 50% is ~1000x normal. A backstop for a runaway, not a load policeman -
+      the read-path spin it would have caught burned one core per stuck reader.
 
   EnableCloudFrontAdditionalMetrics:
     Type: String
     Default: 'true'
     AllowedValues: ['true', 'false']
     Description: >-
-      CloudFront's default metrics are free but coarse. The additional metrics -
-      CacheHitRate, OriginLatency and per-status error rates - must be switched on
-      per distribution and cost about USD 2.40/month for this one. CacheHitRate is
-      the one worth paying for: it is the only direct measure of how much viewer
-      traffic is reaching the origin rather than being served from the edge.
+      Switches on CacheHitRate, OriginLatency and per-status error rates (~USD
+      2.40/month). CacheHitRate is the one worth paying for: the only direct measure
+      of how much traffic reaches the origin instead of the edge.
 
   CloudFrontOriginPrefixList:
     Type: String
@@ -183,10 +201,7 @@ Parameters:
       aws ec2 describe-managed-prefix-lists --filters
       Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
 
-  # Long TTL is only safe because the encoder's segment names carry a per-run
-  # token, so a name is never reused for different bytes. Verify that before
-  # raising it: if names are ever recycled, viewers are served stale video, which
-  # is a far worse failure than a cache miss.
+  # Long TTL is safe ONLY because segment names carry a per-run token. docs sec 12.
   SegmentCacheSeconds:
     Type: Number
     Default: 21600
@@ -194,6 +209,7 @@ Parameters:
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
   WantCfAdditionalMetrics: !Equals [!Ref EnableCloudFrontAdditionalMetrics, 'true']
+  HasBackup: !Not [!Equals [!Ref BackupOriginEip, '']]
 
 Rules:
   RejectOpenEncoderCidr:
@@ -240,7 +256,7 @@ Resources:
       VpcId: !Ref Vpc
       CidrBlock: 10.30.1.0/24
       MapPublicIpOnLaunch: true
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [!Ref AvailabilityZoneIndex, !GetAZs '']
       Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin-public' }]
 
   RouteTable:
@@ -262,13 +278,7 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref RouteTable
 
-  # Two ingress rules with different sources on the same port:
-  #   - the encoder, for PUT/DELETE (ingest)
-  #   - CloudFront's origin-facing prefix list, for GET (playback)
-  #
-  # This is the one real security gain of direct ingest. With an ingest CDN in
-  # front, the prefix list has to allow write methods, so ANY CloudFront
-  # distribution in the world can PUT to your origin. Here only the encoder can.
+  # Encoder PUT/DELETE + CloudFront prefix list GET, same port. docs sec 12.
   OriginSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -300,9 +310,7 @@ Resources:
       Description: Playback CloudFront origin fetches
 
   # ---------------- Stable address for the encoder ----------------
-  # An EIP, because the encoder's destination should not change when the instance
-  # is stopped and started. A public DNS name does change, and re-pointing a live
-  # encoder is not something you want on the critical path of a recovery.
+  # An EIP so the encoder's destination survives a stop/start. docs sec 12.
   OriginEip:
     Type: AWS::EC2::EIP
     Properties:
@@ -374,13 +382,9 @@ Resources:
             Encrypted: true
             DeleteOnTermination: true
       Tags: [{ Key: Name, Value: !Sub '${ChannelPrefix}-origin' }]
-      # Changing ReleaseTag on a live stack does NOT upgrade the server: UserData is
-      # not create-only here, so CloudFormation rewrites it in place and reboots, and
-      # cloud-init runs user data once per instance. Use 3-UPGRADE-to-a-new-version,
-      # then set this to match. What was measured: docs/operations.md.
-      # CreationPolicy so the stack does not report CREATE_COMPLETE while the
-      # compile is still running. Without it an operator sees success and points
-      # an encoder at an origin that is not listening yet.
+      # Changing ReleaseTag on a live stack does NOT upgrade the server - cloud-init
+      # runs UserData once per instance. Use 3-UPGRADE, then set this to match.
+      # CreationPolicy stops CREATE_COMPLETE firing mid-compile. docs/operations.md.
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -467,12 +471,43 @@ Resources:
             CustomOriginConfig:
               OriginProtocolPolicy: http-only
               HTTPPort: !Ref OriginPort
-              OriginReadTimeout: 60
+              # The only thing that catches a HUNG origin. A status code never will.
+              OriginReadTimeout: !Ref OriginReadTimeoutSeconds
               OriginKeepaliveTimeout: 60
+          - !If
+            - HasBackup
+            - Id: ec2-backup
+              DomainName: !Sub
+                - 'ec2-${DashedIp}.${Region}.compute.amazonaws.com'
+                - DashedIp: !Join ['-', !Split ['.', !Ref BackupOriginEip]]
+                  Region: !Ref AWS::Region
+              CustomOriginConfig:
+                OriginProtocolPolicy: http-only
+                HTTPPort: !Ref OriginPort
+                OriginReadTimeout: !Ref OriginReadTimeoutSeconds
+                OriginKeepaliveTimeout: 60
+            - !Ref AWS::NoValue
+        # One group serves manifest and segments: both origins are the same build and
+        # inject their own UTCTiming, so neither needs a different backup.
+        #
+        # 404/403 are deliberately NOT criteria. With -w off a 404 is the normal answer
+        # to a request that beat the encoder - 14 of them in a 12.16M-request test - so
+        # including it would fail over during healthy operation.
+        OriginGroups: !If
+          - HasBackup
+          - Quantity: 1
+            Items:
+              - Id: origin-failover
+                FailoverCriteria:
+                  StatusCodes: { Quantity: 4, Items: [500, 502, 503, 504] }
+                Members:
+                  Quantity: 2
+                  Items: [{ OriginId: ec2-origin }, { OriginId: ec2-backup }]
+          - !Ref AWS::NoValue
         # GET/HEAD/OPTIONS only. Playback has no business writing, and this is
         # what keeps the write path exclusive to the encoder's address.
         DefaultCacheBehavior:
-          TargetOriginId: ec2-origin
+          TargetOriginId: !If [HasBackup, origin-failover, ec2-origin]
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD, OPTIONS]
           CachedMethods: [GET, HEAD, OPTIONS]
@@ -483,7 +518,7 @@ Resources:
         CacheBehaviors:
           # Matches nested paths too, verified: *.mpd hits /a/b/c.mpd.
           - PathPattern: '*.mpd'
-            TargetOriginId: ec2-origin
+            TargetOriginId: !If [HasBackup, origin-failover, ec2-origin]
             ViewerProtocolPolicy: redirect-to-https
             AllowedMethods: [GET, HEAD, OPTIONS]
             CachedMethods: [GET, HEAD, OPTIONS]
@@ -540,13 +575,8 @@ Resources:
       Protocol: email
       Endpoint: !Ref AlarmEmail
 
-  # The highest-value alarm, and nothing to do with leaks: it is the only thing
-  # that reports the stream is off the air without a viewer complaining.
-  #
-  # TreatMissingData: breaching is deliberate. The publisher deliberately sends
-  # NOTHING when the origin's admin endpoint does not answer, because a zero would
-  # be indistinguishable from a healthy reading. Absent data therefore means the
-  # origin is not answering, which is exactly when this should fire.
+  # The only alarm that reports the stream is off air. TreatMissingData:
+  # breaching is deliberate - absent data means not answering. docs sec 12.
   IngestStaleAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -643,13 +673,8 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]
 
-  # The alarm that tells you to go and restart the encoder output.
-  #
-  # EC2 automatic recovery is already enabled by default and will migrate the
-  # instance without being asked - but it does not NOTIFY, and recovery empties RAM.
-  # Elemental Live only sends initialisation segments when an output group starts,
-  # so after a host event new viewers get 404 on init until the encoder output is
-  # restarted. Existing viewers keep playing, which is what makes it easy to miss.
+  # Fires so you go and restart the encoder output: EC2 auto-recovery does not
+  # notify and empties RAM, so new viewers 404 on init. docs sec 12.
   HostEventAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -673,17 +698,8 @@ Resources:
       AlarmActions: [!Ref AlarmTopic]
       OKActions: [!Ref AlarmTopic]
 
-  # NOTE: there is deliberately NO CloudFront alarm anywhere in this solution.
-  # CloudWatch alarms are regional and CloudFront publishes only to us-east-1 -
-  # verified: AWS/CloudFront has 0 metrics in this region and 100 in us-east-1. An
-  # alarm here would sit in OK forever and never fire, and putting one in us-east-1
-  # means a second stack plus a second SNS topic and email confirmation for a single
-  # rate-based metric that is silent until you have an audience.
-  #
-  # The origin-side alarms cover the same ground without that blind spot: if the
-  # origin stops answering, ingest-stale fires because the publisher deliberately
-  # sends nothing and missing data is treated as breaching. CloudFront errors remain
-  # visible on the dashboard, which CAN graph across regions - only alarms cannot.
+  # NOTE: deliberately NO CloudFront alarm - alarms are regional and CloudFront
+  # publishes only to us-east-1, so one here would never fire. docs sec 12.
 
   # One URL that answers "is the stream up, is memory fine, is anything alarming",
   # so an operator does not need an SSM session to find out. The first three
@@ -820,14 +836,8 @@ Resources:
         }
 
   # ---------------- Operator buttons ----------------
-  # Two SSM documents so a non-technical operator never has to open a shell or
-  # remember a command: Systems Manager > Run Command > pick one > Run.
-  #
-  # The CHECK document exists because the most common incident is not a broken
-  # origin at all - it is the encoder having stopped, or initialisation segments
-  # missing after a restart. Both look like "the stream is broken" and neither is
-  # fixed by touching this server. Rebooting when init segments are missing makes
-  # it WORSE: it clears RAM again and the encoder still has to be restarted.
+  # So an operator never needs a shell. CHECK exists because the usual incident is
+  # the encoder, not this server - and rebooting makes it worse. docs sec 12.
   CheckDocument:
     Type: AWS::SSM::Document
     Properties:
@@ -906,12 +916,8 @@ Resources:
                   echo " Check the player, or the CloudWatch dashboard for viewer errors."
                   echo "==============================================="
 
-  # The emergency path. The NORMAL path is a stack update, which replaces the
-  # instance and therefore rolls back automatically if the new build fails - see
-  # docs/operations.md. This exists for when minutes matter, and it deliberately
-  # prints the drift warning: it changes the running instance without changing the
-  # stack, so the next instance replacement would revert unless ReleaseTag is
-  # updated too.
+  # Emergency path only; the normal path is a stack update. Prints a drift
+  # warning because it changes the instance, not the stack. docs sec 12.
   UpgradeDocument:
     Type: AWS::SSM::Document
     Properties:
@@ -1036,7 +1042,7 @@ Outputs:
     Value: !Sub 'https://${PlaybackDistribution.DomainName}/${StreamName}.mpd'
 
   OriginEipAddress:
-    Description: Stable ingest address. Survives stop/start; re-pointing the encoder should never be on a recovery path.
+    Description: Stable ingest address; survives stop/start.
     Value: !Ref OriginEip
 
   DashboardUrl:
@@ -1051,8 +1057,7 @@ Outputs:
 
   OperatorRunCommandConsole:
     Description: >-
-      Give this to whoever operates the stream. Systems Manager > Run Command >
-      choose the document starting 1-CHECK before doing anything else.
+      For whoever operates the stream. Run the 1-CHECK document before anything else.
     Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/systems-manager/run-command/executing-commands?region=${AWS::Region}'
 
   AdminCheck:
